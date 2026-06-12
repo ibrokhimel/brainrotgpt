@@ -1,16 +1,20 @@
 """BrainrotGPT Telegram bot.
 
-Forward/paste a convo (or a screenshot), tweak the style, and get one giant
-brainrot reply you can paste straight back. Long polling by default; optional
-webhook mode. Persists settings/favorites/analytics to SQLite.
+Forward/paste a convo (or a screenshot), tweak the style, and get a short
+brainrot reply you can paste straight back (length is adjustable in /settings).
+Long polling by default; optional webhook mode. Persists settings to SQLite.
 """
 import asyncio
 import datetime
+import hashlib
 import io
 import logging
+import socket
 import time
+from collections import deque
 
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
@@ -18,6 +22,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -34,6 +39,7 @@ import db
 import guard
 import health
 import share_card
+import trends
 import vision
 from brainrot import PERSONA_BY_KEY, PERSONAS, BrainrotError, BrainrotResult
 from rate_limit import RateLimiter
@@ -64,13 +70,19 @@ DEBOUNCE_S = 1.5         # wait after the last message before showing the confir
 SESSION_TTL_S = 1800     # evict idle buffers after 30 min
 
 INTENSITY_LABELS = {"mild": "🌶 Mild", "medium": "🔥 Medium", "unhinged": "☢️ Unhinged"}
+LENGTH_LABELS = {"short": "💬 Short", "medium": "📄 Medium", "long": "📜 Long", "max": "🧱 Max"}
 TONE_LABELS = {
     "default": "😐 Default", "roast": "🔥 Roast", "cope": "😤 Cope",
     "hype": "🚀 Hype", "deny": "🙅 Deny", "gaslight": "🌀 Gaslight",
 }
+# Languages ordered by Telegram's biggest user bases (Uzbek/English/Russian
+# pinned up front), then ranked by country: India, Indonesia, Brazil, Iran,
+# Egypt/Gulf, LatAm, Ukraine, Turkey.
 LANGS = [
-    ("auto", "🌐 Auto"), ("English", "🇬🇧 English"), ("Spanish", "🇪🇸 Spanish"),
-    ("Hindi", "🇮🇳 Hindi"), ("Arabic", "🇸🇦 Arabic"), ("French", "🇫🇷 French"),
+    ("auto", "🌐 Auto"), ("Uzbek", "🇺🇿 Uzbek"), ("English", "🇬🇧 English"),
+    ("Russian", "🇷🇺 Russian"), ("Hindi", "🇮🇳 Hindi"), ("Indonesian", "🇮🇩 Indonesian"),
+    ("Portuguese", "🇧🇷 Portuguese"), ("Persian", "🇮🇷 Persian"), ("Arabic", "🇸🇦 Arabic"),
+    ("Spanish", "🇪🇸 Spanish"), ("Ukrainian", "🇺🇦 Ukrainian"), ("Turkish", "🇹🇷 Turkish"),
 ]
 
 WELCOME = (
@@ -81,9 +93,25 @@ WELCOME = (
     "1️⃣ forward/paste the messages (or a screenshot)\n"
     "2️⃣ i show what i caught + a ✅ Generate button\n"
     "3️⃣ tap Generate → receive maximum aura 📈🗿\n\n"
-    "🎭 /settings — pick a style, intensity, tone, language, best-of-N\n"
+    "🎭 /settings — style, length, intensity, tone, language, best-of-N\n"
     "commands: /done · /clear · /settings · /saved · /last · /leaderboard · /daily · /help"
 )
+
+# Commands shown in Telegram's "/" menu (set via set_my_commands on startup).
+# stats is owner-only, so it's intentionally left out of the public menu.
+BOT_COMMANDS = [
+    BotCommand("start", "wake the bot up 🗿"),
+    BotCommand("done", "cook the brainrot reply now 🍳"),
+    BotCommand("settings", "style · length · intensity · tone · language 🎭"),
+    BotCommand("persona", "quick style picker 🎭"),
+    BotCommand("last", "resend your last reply ↩️"),
+    BotCommand("saved", "your saved bangers ⭐"),
+    BotCommand("leaderboard", "top styles this week 📊"),
+    BotCommand("daily", "toggle daily brainrot 🔔"),
+    BotCommand("brainrot", "@mention me or reply in a group 👥"),
+    BotCommand("clear", "wipe the current convo 🗑"),
+    BotCommand("help", "how this thing works ❓"),
+]
 
 HELP = (
     "BrainrotGPT 🗿\n\n"
@@ -91,11 +119,14 @@ HELP = (
     "• i show a preview + buttons once you stop sending\n"
     "• ✅ Generate cooks it · 🔄 Regenerate rerolls · ⭐ Save · 🖼 Share\n"
     "• best-of-N gives you ◀ ▶ candidates to flip through\n\n"
-    "🎭 /settings — style / intensity / tone / language / best-of-N\n"
+    "🎭 /settings — style / length / intensity / tone / language / best-of-N\n"
     "/persona — quick style picker\n"
     "/saved — your saved bangers · /last — resend last reply\n"
     "/leaderboard — top styles this week · /daily — daily brainrot on/off\n"
-    "in groups: reply to a message with /brainrot · inline: @yourbot <text>\n\n"
+    "in groups: add me + @mention me and i'll cook off the recent chat (or reply "
+    "to a msg / use /brainrot). turn my privacy mode OFF in BotFather so i can "
+    "read messages 👀\n"
+    "inline (any chat): @yourbot <paste the text> — inline can only see what you type\n\n"
     "commands: /done · /clear · /help"
 )
 
@@ -104,6 +135,37 @@ def get_session(chat_id: int) -> dict:
     s = sessions.setdefault(chat_id, {"buffer": [], "candidates": [], "cand_idx": 0})
     s["ts"] = time.time()
     return s
+
+
+def group_history(chat_id: int) -> deque:
+    """Rolling buffer of recent group messages (lives on the session so it's
+    evicted by the same idle cleanup). Powers @mention auto-context in groups."""
+    s = get_session(chat_id)
+    dq = s.get("history")
+    if dq is None:
+        dq = deque(maxlen=config.GROUP_HISTORY_SIZE)
+        s["history"] = dq
+    return dq
+
+
+def parse_mention(msg, bot_username: str | None, bot_id: int) -> tuple[bool, str]:
+    """Return (was the bot @mentioned, the message text with that mention removed)."""
+    text = msg.text or msg.caption or ""
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    uname = f"@{bot_username}".lower() if bot_username else None
+    mentioned = False
+    spans: list[tuple[int, int]] = []
+    for e in entities:
+        if e.type == "mention" and uname and text[e.offset:e.offset + e.length].lower() == uname:
+            mentioned = True
+            spans.append((e.offset, e.offset + e.length))
+        elif e.type == "text_mention" and getattr(e, "user", None) and e.user.id == bot_id:
+            mentioned = True
+            spans.append((e.offset, e.offset + e.length))
+    leftover = text
+    for start, end in sorted(spans, reverse=True):
+        leftover = leftover[:start] + leftover[end:]
+    return mentioned, leftover.strip()
 
 
 # --- Forward-origin helpers (unchanged) -----------------------------------
@@ -256,6 +318,7 @@ def settings_text(chat_id: int) -> str:
     return (
         "⚙️ settings — tap to change\n\n"
         f"🎭 style: {persona_label_of(s['persona'])}\n"
+        f"📏 length: {LENGTH_LABELS.get(s['length'], s['length'])}\n"
         f"🎚 intensity: {INTENSITY_LABELS.get(s['intensity'], s['intensity'])}\n"
         f"🎯 tone: {TONE_LABELS.get(s['tone'], s['tone'])}\n"
         f"🌐 language: {s['language']}\n"
@@ -266,7 +329,10 @@ def settings_text(chat_id: int) -> str:
 def settings_kb(chat_id: int) -> InlineKeyboardMarkup:
     s = db.get_settings(chat_id)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🎭 Style: {persona_label_of(s['persona'])}", callback_data="s:p")],
+        [
+            InlineKeyboardButton(f"🎭 {persona_label_of(s['persona'])}", callback_data="s:p"),
+            InlineKeyboardButton(f"📏 {LENGTH_LABELS.get(s['length'], s['length'])}", callback_data="s:len"),
+        ],
         [
             InlineKeyboardButton(INTENSITY_LABELS.get(s["intensity"], s["intensity"]), callback_data="s:i"),
             InlineKeyboardButton(TONE_LABELS.get(s["tone"], s["tone"]), callback_data="s:t"),
@@ -293,11 +359,11 @@ def persona_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _simple_kb(field: str, options: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+def _simple_kb(field: str, options: list[tuple[str, str]], columns: int = 2) -> InlineKeyboardMarkup:
     rows, row = [], []
     for value, label in options:
         row.append(InlineKeyboardButton(label, callback_data=f"v:{field}:{value}"))
-        if len(row) == 2:
+        if len(row) == columns:
             rows.append(row)
             row = []
     if row:
@@ -310,12 +376,16 @@ def intensity_kb():
     return _simple_kb("i", [(k, v) for k, v in INTENSITY_LABELS.items()])
 
 
+def length_kb():
+    return _simple_kb("len", [(k, v) for k, v in LENGTH_LABELS.items()])
+
+
 def tone_kb():
     return _simple_kb("t", [(k, v) for k, v in TONE_LABELS.items()])
 
 
 def lang_kb():
-    return _simple_kb("l", [(v, lbl) for v, lbl in LANGS])
+    return _simple_kb("l", [(v, lbl) for v, lbl in LANGS], columns=3)
 
 
 def cand_kb():
@@ -424,6 +494,72 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only live-trends curation: /trend [list|add <t>|ban <t>|remove <t>|refresh].
+
+    Trends are mixed into every generated reply, so this is gated to owners.
+    """
+    if not guard.is_owner(update.effective_user.id):
+        await update.message.reply_text("owner only 🔒")
+        return
+    args = context.args or []
+    sub = args[0].lower() if args else "list"
+    rest = " ".join(args[1:]).strip()
+
+    if sub in ("list", "ls"):
+        rows = db.list_trends(limit=40)
+        auto = db.count_trends(source="auto")
+        if not rows:
+            await update.message.reply_text(
+                "no live trends yet 📭\nadd one: /trend add 67 · pull some: /trend refresh"
+            )
+            return
+        lines = [f"🔥 live trends ({len(rows)} shown · {auto} auto) — mixed into replies:\n"]
+        for r in rows:
+            lines.append(f"{'🤖' if r['source'] == 'auto' else '✍️'} {r['term']}")
+        lines.append("\n/trend add <t> · ban <t> · remove <t> · refresh")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if sub == "add":
+        if not rest:
+            await update.message.reply_text("usage: /trend add <term>")
+            return
+        ok = db.add_trend(rest, source="manual")
+        await update.message.reply_text(f"added ✅ {rest}" if ok else f"already live / banned 🤔 {rest}")
+        return
+
+    if sub in ("ban", "block"):
+        if not rest:
+            await update.message.reply_text("usage: /trend ban <term>")
+            return
+        db.ban_trend(rest)
+        await update.message.reply_text(f"banned 🚫 {rest} (hidden + won't auto-readd)")
+        return
+
+    if sub in ("remove", "rm", "del", "delete"):
+        if not rest:
+            await update.message.reply_text("usage: /trend remove <term>")
+            return
+        ok = db.remove_trend(rest)
+        await update.message.reply_text(f"removed 🗑 {rest}" if ok else f"not found 🤷 {rest}")
+        return
+
+    if sub == "refresh":
+        await update.message.reply_text("pulling fresh trends 🔄… (best-effort)")
+        try:
+            n = await trends.refresh()
+        except Exception as e:  # noqa: BLE001
+            await update.message.reply_text(f"refresh failed 😭 ({str(e)[:80]})")
+            return
+        await update.message.reply_text(f"done ✅ +{n} new — see /trend list")
+        return
+
+    await update.message.reply_text(
+        "usage: /trend [list | add <t> | ban <t> | remove <t> | refresh]"
+    )
+
+
 async def cmd_brainrot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Group mode: reply to a message with /brainrot, or /brainrot <text>."""
     msg = update.message
@@ -439,8 +575,10 @@ async def cmd_brainrot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts.append({"sender": name, "text": reply.text or reply.caption})
     if context.args:
         parts.append({"sender": None, "text": " ".join(context.args)})
+    if not parts:  # bare /brainrot → fall back to the recent group buffer
+        parts = list(group_history(chat_id))
     if not parts:
-        await msg.reply_text("reply to a message with /brainrot (or /brainrot <text>) 🙏")
+        await msg.reply_text("reply to a msg, @mention me, or /brainrot <text> 🙏")
         return
     allowed, reason = limiter.check(user_id)
     if not allowed:
@@ -499,6 +637,67 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["buffer"].append({"sender": None, "text": transcript})
     await status.edit_text("got the screenshot ✅")
     schedule_confirm(context, chat_id)
+
+
+async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """In groups: buffer recent messages, and when the bot is @mentioned (or its
+    own message is replied to) cook a brainrot reply off that recent context.
+
+    Needs privacy mode OFF in BotFather (/setprivacy → Disable) to receive the
+    non-mention messages; with privacy ON only the mention/reply itself is seen.
+    """
+    msg = update.message
+    if msg is None or not (msg.text or msg.caption):
+        return
+    me = context.bot
+    if msg.from_user and msg.from_user.id == me.id:
+        return  # never buffer or react to our own messages
+    chat_id = update.effective_chat.id
+    text = msg.text or msg.caption
+
+    mentioned, leftover = parse_mention(msg, me.username, me.id)
+    reply = msg.reply_to_message
+    reply_to_bot = bool(reply and reply.from_user and reply.from_user.id == me.id)
+
+    if not (mentioned or reply_to_bot):
+        sender = msg.from_user.full_name if msg.from_user else "Them"
+        group_history(chat_id).append({"sender": sender, "text": text})
+        return
+
+    # --- summoned: cook a reply off the recent buffer + this message ---
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        await msg.reply_text("this bot is private 🔒")
+        return
+
+    parts = list(group_history(chat_id))
+    if reply and reply.from_user and reply.from_user.id != me.id and (reply.text or reply.caption):
+        entry = {"sender": reply.from_user.full_name, "text": reply.text or reply.caption}
+        if entry not in parts:
+            parts.append(entry)
+    if leftover:  # whatever they typed next to the @mention — use it + remember it
+        entry = {"sender": msg.from_user.full_name if msg.from_user else None, "text": leftover}
+        parts.append(entry)
+        group_history(chat_id).append(entry)
+
+    if not parts:
+        await msg.reply_text(
+            "mention me after a few messages and i'll cook a reply 🍳🗿\n"
+            "(heads up: i only see messages sent after i joined — turn my privacy "
+            "mode OFF in BotFather so i can read the chat)"
+        )
+        return
+
+    allowed, reason = limiter.check(user_id)
+    if not allowed:
+        await msg.reply_text(reason)
+        return
+
+    session = get_session(chat_id)
+    session["buffer"] = parts
+    status = await msg.reply_text(COOKING_FRAMES[0])
+    limiter.record(user_id)
+    await cook(context, chat_id, user_id, status, regen=False)
 
 
 def schedule_confirm(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -652,15 +851,14 @@ async def render_result(bot, chat_id, mid, session):
         return
     idx = session.get("cand_idx", 0) % len(results)
     r = results[idx]
-    footer = f"— {r.persona_label}"
-    if len(results) > 1:
-        footer = f"{idx + 1}/{len(results)} • {footer}"
+    # Output is just the reply — no "— persona" footer (paste-ready). The
+    # best-of-N counter lives in the keyboard, so nothing useful is lost.
     body = r.text
     truncated = False
-    if len(body) + len(footer) + 4 > MSG_CAP:
-        body = body[: MSG_CAP - len(footer) - 12].rstrip()
+    if len(body) > MSG_CAP:
+        body = body[: MSG_CAP - 1].rstrip()
         truncated = True
-    display = f"{body}{'…' if truncated else ''}\n\n{footer}"
+    display = f"{body}…" if truncated else body
     kb = result_keyboard(len(results), idx, truncated)
     try:
         await bot.edit_message_text(display, chat_id=chat_id, message_id=mid, reply_markup=kb)
@@ -686,8 +884,11 @@ async def handle_settings_cb(query, chat_id, data):
     if data == "s:p":
         await query.edit_message_text("🎭 pick a style:", reply_markup=persona_kb())
         return
+    if data == "s:len":
+        await query.edit_message_text("📏 pick output length:", reply_markup=length_kb())
+        return
     if data == "s:i":
-        await query.edit_message_text("🎚 pick intensity:", reply_markup=intensity_kb())
+        await query.edit_message_text("🎚 pick intensity (how feral):", reply_markup=intensity_kb())
         return
     if data == "s:t":
         await query.edit_message_text("🎯 pick a tone:", reply_markup=tone_kb())
@@ -700,7 +901,10 @@ async def handle_settings_cb(query, chat_id, data):
         return
     if data.startswith("v:"):
         _, field, value = data.split(":", 2)
-        keymap = {"p": "persona", "i": "intensity", "t": "tone", "l": "language", "c": "candidates"}
+        keymap = {
+            "p": "persona", "i": "intensity", "len": "length",
+            "t": "tone", "l": "language", "c": "candidates",
+        }
         key = keymap.get(field)
         if key:
             try:
@@ -856,7 +1060,8 @@ async def on_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed:
         await iq.answer([_article("rl", "slow down a sec ⏳", reason or "slow down ⏳")], cache_time=2)
         return
-    settings = {"persona": "random", "intensity": "mild", "tone": "default", "language": "auto", "candidates": 1}
+    settings = {"persona": "random", "intensity": "mild", "length": "short",
+                "tone": "default", "language": "auto", "candidates": 1}
     try:
         res = await asyncio.wait_for(brainrot.generate(q, settings), timeout=9)
         limiter.record(user_id)
@@ -907,6 +1112,15 @@ async def cleanup_sessions(context: ContextTypes.DEFAULT_TYPE):
         logger.info("cleaned %d idle session(s)", len(stale))
 
 
+async def trend_refresh_job(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled best-effort pull of fresh slang into the live trends table."""
+    try:
+        n = await trends.refresh()
+        logger.info("scheduled trend refresh added %d term(s)", n)
+    except Exception as e:  # noqa: BLE001 — never let the job crash the queue
+        logger.warning("trend refresh job failed: %s", e)
+
+
 # --- Lifecycle ------------------------------------------------------------
 
 async def on_startup(app: Application):
@@ -915,6 +1129,18 @@ async def on_startup(app: Application):
     app.job_queue.run_repeating(cleanup_sessions, interval=600, first=600)
     for sub in db.list_subscriptions():
         schedule_daily(app.job_queue, sub["chat_id"], sub["hour"])
+    if config.TREND_FETCH_ENABLED:
+        app.job_queue.run_daily(
+            trend_refresh_job,
+            time=datetime.time(hour=config.TREND_FETCH_HOUR % 24),
+            name="trend_refresh",
+        )
+        if db.count_trends(source="auto") == 0:  # seed shortly after first boot
+            app.job_queue.run_once(trend_refresh_job, when=120, name="trend_refresh_seed")
+    try:
+        await app.bot.set_my_commands(BOT_COMMANDS)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("failed to set command menu: %s", e)
     logger.info("startup complete (model=%s, fallback=%s)", config.GROQ_MODEL, config.GROQ_FALLBACK_MODEL)
 
 
@@ -922,9 +1148,54 @@ async def on_shutdown(app: Application):
     db.close()
 
 
+# --- Error handling + single-instance guard -------------------------------
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Central error handler so failures are logged cleanly (the alternative is
+    PTB's 'No error handlers are registered' + a full traceback per error)."""
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.error(
+            "getUpdates 409 conflict — another instance is polling this bot token. "
+            "Only ONE instance may run. Stop the duplicate (see SINGLE_INSTANCE_LOCK)."
+        )
+        return
+    logger.error("unhandled error while processing an update: %r", err, exc_info=err)
+
+
+# Held for the whole process lifetime; the OS frees it on exit (no stale locks).
+_instance_lock_sock: socket.socket | None = None
+
+
+def acquire_single_instance_lock() -> bool:
+    """Best-effort single-instance guard: bind a localhost port derived from the
+    bot token. Another running instance of the SAME bot already holds it, so the
+    bind fails and we return False. Auto-released when the process dies."""
+    global _instance_lock_sock
+    digest = hashlib.sha256(config.BOT_TOKEN.encode()).digest()
+    port = 49152 + (int.from_bytes(digest[:2], "big") % 10000)  # stable high port
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))  # no SO_REUSEADDR → exclusive bind
+    except OSError:
+        s.close()
+        return False
+    s.listen(1)
+    _instance_lock_sock = s
+    return True
+
+
 # --- Entry point ----------------------------------------------------------
 
 def main():
+    if config.SINGLE_INSTANCE_LOCK and not acquire_single_instance_lock():
+        logger.error(
+            "another BrainrotGPT instance is already running for this bot token — "
+            "exiting to avoid a getUpdates 409 conflict. "
+            "(set SINGLE_INSTANCE_LOCK=false to override.)"
+        )
+        raise SystemExit(1)
+
     health.start_health_server(config.HEALTH_PORT)
 
     app = (
@@ -945,6 +1216,7 @@ def main():
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
     app.add_handler(CommandHandler("daily", cmd_daily))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("trend", cmd_trend))
     app.add_handler(CommandHandler("brainrot", cmd_brainrot))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(InlineQueryHandler(on_inline))
@@ -954,6 +1226,10 @@ def main():
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, on_message
     ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_group_message
+    ))
+    app.add_error_handler(on_error)
 
     if config.WEBHOOK_URL:
         logger.info("BrainrotGPT starting on webhook %s", config.WEBHOOK_URL)
@@ -964,10 +1240,11 @@ def main():
             webhook_url=f"{config.WEBHOOK_URL.rstrip('/')}/{config.BOT_TOKEN}",
             secret_token=config.WEBHOOK_SECRET or None,
             allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
         )
     else:
         logger.info("BrainrotGPT starting on long polling…")
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

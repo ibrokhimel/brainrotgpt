@@ -4,8 +4,8 @@ import pytest
 
 import brainrot
 
-SETTINGS = {"persona": "random", "intensity": "medium", "tone": "default",
-            "language": "auto", "candidates": 1}
+SETTINGS = {"persona": "random", "intensity": "medium", "length": "medium",
+            "tone": "default", "language": "auto", "candidates": 1}
 
 
 class _Msg:
@@ -36,15 +36,15 @@ def _patch(monkeypatch, content="brainrot reply 🗿"):
 
 
 def test_choose_persona_pinned():
-    s = dict(SETTINGS, persona="gym_sigma")
-    assert brainrot.choose_persona(s)[0] == "gym_sigma"
+    s = dict(SETTINGS, persona="sigma")
+    assert brainrot.choose_persona(s)[0] == "sigma"
 
 
 def test_choose_persona_random_avoids():
     # avoid a key 200x; it should never come back
     for _ in range(200):
-        p = brainrot.choose_persona(SETTINGS, avoid_persona="gym_sigma")
-        assert p[0] != "gym_sigma"
+        p = brainrot.choose_persona(SETTINGS, avoid_persona="sigma")
+        assert p[0] != "sigma"
 
 
 def test_distinct_personas_are_distinct():
@@ -54,10 +54,13 @@ def test_distinct_personas_are_distinct():
 
 
 def test_system_prompt_includes_flavor():
-    persona = brainrot.PERSONA_BY_KEY["corporate_memo"]
-    prompt = brainrot._build_system_prompt(persona, dict(SETTINGS, intensity="unhinged"))
-    assert "CORPORATE" in prompt
-    assert "MAXIMUM length" in prompt  # unhinged intensity line
+    persona = brainrot.PERSONA_BY_KEY["conspiracy"]
+    prompt = brainrot._build_system_prompt(
+        persona, dict(SETTINGS, intensity="unhinged", length="max")
+    )
+    assert "CONSPIRACY" in prompt
+    assert "MAXIMUM chaos" in prompt   # unhinged intensity line
+    assert "MAXIMUM length" in prompt  # max length line (decoupled from intensity)
     assert "VOCAB" in prompt
 
 
@@ -67,8 +70,16 @@ def test_user_content_wraps_and_avoids():
     assert "REGENERATE" in content and "old reply" in content
 
 
-def test_max_tokens_by_intensity():
-    assert brainrot._max_tokens({"intensity": "mild"}) < brainrot._max_tokens({"intensity": "unhinged"})
+def test_max_tokens_by_length():
+    # token cap now follows LENGTH, not intensity
+    assert brainrot._max_tokens({"length": "short"}) < brainrot._max_tokens({"length": "max"})
+
+
+def test_vocab_sample_size_and_static_fallback():
+    # with no DB open, trend lookup yields nothing → pure static sample of k terms
+    sample = brainrot._vocab_sample(k=8)
+    assert len(sample) == 8
+    assert all(isinstance(s, str) for s in sample)
 
 
 def test_generate_returns_result(monkeypatch):
@@ -92,3 +103,28 @@ def test_generate_retries_then_fails(monkeypatch):
     monkeypatch.setattr(brainrot._client.chat.completions, "create", boom)
     with pytest.raises(brainrot.BrainrotError, match="groq down"):
         asyncio.run(brainrot.generate("hello", SETTINGS))
+
+
+class _FakeClient:
+    """Minimal stand-in for AsyncGroq: .chat.completions.create runs `behavior`."""
+    def __init__(self, behavior):
+        async def create(**kwargs):
+            return behavior(**kwargs)
+        self.chat = type("C", (), {"completions": type("X", (), {"create": staticmethod(create)})})
+
+
+def test_backup_key_used_when_primary_out_of_tokens(monkeypatch):
+    calls = {"primary": 0, "backup": 0}
+
+    def primary(**k):
+        calls["primary"] += 1
+        raise RuntimeError("rate_limit_exceeded: out of tokens")
+
+    def backup(**k):
+        calls["backup"] += 1
+        return _Resp("from the backup key 🔑")
+
+    monkeypatch.setattr(brainrot, "_clients", [_FakeClient(primary), _FakeClient(backup)])
+    res = asyncio.run(brainrot.generate("hello", SETTINGS))
+    assert res.text == "from the backup key 🔑"
+    assert calls["primary"] >= 1 and calls["backup"] == 1  # fell through to backup

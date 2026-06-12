@@ -14,6 +14,17 @@ def test_default_settings():
     s = db.get_settings(1)
     assert s["persona"] == "random"
     assert s["candidates"] == 1
+    assert s["length"] == db.config.DEFAULT_LENGTH
+
+
+def test_length_persists():
+    db.set_setting(1, "length", "max")
+    assert db.get_settings(1)["length"] == "max"
+
+
+def test_bad_length_rejected():
+    with pytest.raises(ValueError):
+        db.set_setting(1, "length", "nope")
 
 
 def test_set_setting_persists():
@@ -60,3 +71,38 @@ def test_subscriptions():
     assert any(s["chat_id"] == 1 for s in db.list_subscriptions())
     db.remove_subscription(1)
     assert db.list_subscriptions() == []
+
+
+# --- trends ---------------------------------------------------------------
+
+def test_trend_add_and_list():
+    assert db.add_trend("67", source="manual") is True
+    assert db.add_trend("67", source="manual") is False  # dup
+    assert db.add_trend("SIX seven", source="auto") is True
+    terms = {t["term"] for t in db.list_trends()}
+    assert "67" in terms and "SIX seven" in terms
+
+
+def test_trend_dedup_is_case_insensitive():
+    db.add_trend("Skibidi", source="auto")
+    assert db.add_trend("skibidi", source="auto") is False
+    assert db.count_trends() == 1
+
+
+def test_trend_ban_hides_and_blocks_auto():
+    db.add_trend("chopped", source="auto")
+    db.ban_trend("chopped")
+    assert "chopped" not in {t["term"] for t in db.list_trends()}          # hidden
+    assert "chopped" in db.banned_trend_terms()
+    assert db.add_trend("chopped", source="auto") is False                  # blocked
+    # a manual add un-bans it
+    assert db.add_trend("chopped", source="manual") is True
+    assert "chopped" in {t["term"] for t in db.list_trends()}
+
+
+def test_trend_remove_and_gen_list():
+    db.add_trend("mewing", source="manual")
+    assert "mewing" in db.trend_terms_for_generation()
+    assert db.remove_trend("mewing") is True
+    assert db.remove_trend("mewing") is False
+    assert "mewing" not in db.trend_terms_for_generation()

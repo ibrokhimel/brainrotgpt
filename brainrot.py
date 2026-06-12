@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from groq import AsyncGroq
 
 import config
+import db
 import guard
 
 # Core rules — true for EVERY reply. Flavor is injected per-call below.
@@ -23,35 +24,47 @@ BASE_RULES = """You are BrainrotGPT, an elite reply generator. You are handed a 
 RULES:
 - READ the whole conversation and reply to the latest message / the overall point being made. Your reply MUST be on-topic and make sense as a genuine response — never ignore what they said.
 - Reply as the user (first person), like you're firing back in the chat.
-- Overdramatic — expand a tiny thought into a giant rant.
-- Write everything as ONE SINGLE PARAGRAPH. NO line breaks. NO bullet points. NO lists.
-- Add massive amounts of emojis throughout. Every sentence should contain multiple emojis.
+- Overdramatic — treat the tiniest thing like a colossal deal. (How LONG the reply runs is set by the LENGTH instruction below — obey it; do NOT default to a giant rant.)
+- NO line breaks. NO bullet points. NO lists — it's one flowing message.
+- Stuff it with emojis — multiple per sentence.
 - Make simple events sound like world-ending catastrophes. Compare ordinary problems to absurd cosmic events.
-- Add fake lore, fake organizations, fake councils, fake audits, fake dimensions, and fake emergency meetings.
+- Fake lore (councils, audits, dimensions, emergency meetings) is great flavor, but only as much as the LENGTH allows — don't pad a short reply with it.
 - Keep it readable despite the insanity. Keep it funny, absurd, and intentionally excessive.
 - Never use hateful, threatening, or harmful language.
 - Output ONLY the reply paragraph — no preamble, no quotes, no explanation."""
 
 # One PERSONA per call — the single biggest lever against samey output.
-# (key, display label, instruction).
+# (key, display label, instruction). These are recognizable internet-culture
+# *voices* (kept orthogonal to TONE, which is the attitude toward the situation).
 PERSONAS = [
-    ("gym_sigma", "🏋️ Gym Sigma", "Channel a delusional GYM SIGMA grindset coach — everything is mindset, discipline, 5am cold plunges, being 'locked in'. Treat the convo like a breakdown of someone's mental fortitude."),
-    ("doomer_prophet", "🔮 Doomer Prophet", "Channel a DOOMER PROPHET narrating the end times — a cracked street preacher who saw the apocalypse in the convo. Ominous, biblical, still brainrot."),
-    ("corporate_memo", "📊 Corporate Memo", "Frame the ENTIRE thing as a CORPORATE incident report / quarterly review — KPIs, stakeholders, post-mortems, 'circling back', 'per my last message', synergy — in unhinged brainrot."),
-    ("conspiracy", "🛸 Conspiracy", "Channel a CONSPIRACY THEORIST — the convo is a coordinated op by shadowy councils, the government, lizard people, Big Aura. Connect everything to a grand hidden agenda."),
-    ("sports_caster", "🎙️ Sportscaster", "Narrate it like a LIVE SPORTS / boxing broadcast — play-by-play, the crowd, the replay, overtime, a buzzer-beater. Hype commentator energy."),
-    ("romantic_poet", "🥀 Romantic Poet", "Channel a melodramatic ROMANTIC / Shakespearean POET — heartbreak, sonnets, 'alas', tragic longing, the moon weeping — completely brainrot."),
-    ("npc_glitch", "🎮 Glitched NPC", "Speak like a GLITCHED GAME NPC / malfunctioning AI — repeated dialogue, lag, '[ERROR]', loading bars, respawning, 'quest failed'. Robotic and broken but dramatic."),
-    ("courtroom", "⚖️ Courtroom", "Frame it as a COURTROOM DRAMA — objections, 'order in the court', exhibit A, the jury gasps, cross-examination, the verdict. Legal-thriller theatrics."),
-    ("nature_doc", "🦎 Nature Doc", "Narrate it as a NATURE DOCUMENTARY — hushed Attenborough voice observing the wild specimen in its habitat, the hunt, the migration, 'and here, we witness'."),
-    ("fantasy_quest", "🐉 Fantasy Quest", "Frame it as an EPIC FANTASY QUEST — kingdoms, dragons, cursed artifacts, the chosen one, the dark lord, a prophecy, taverns. Medieval-RPG melodrama."),
-    ("infomercial", "📺 Infomercial", "Channel a 3AM INFOMERCIAL host — 'But WAIT, there's more!', limited time offer, operators standing by. Overhyped salesman energy."),
-    ("cooking_show", "👨‍🍳 Cooking Show", "Narrate it like an unhinged COOKING SHOW / MasterChef — plating the situation, the seasoning, 'it's RAW', the judges, Gordon Ramsay screaming. Culinary chaos."),
+    ("sigma", "🗿 Sigma", "Channel a delusional SIGMA / gigachad grindset coach — everything is mindset, discipline, 5am cold plunges, 'staying locked in', looksmaxxing, never beta. Treat the convo as a test of someone's mental fortitude."),
+    ("skibidi", "💀 Skibidi", "Go FULL unfiltered skibidi brainrot — maximum Ohio, Fanum tax, gyatt, rizz, every brainrot term firing at once with zero self-awareness. The most chronically-online reply imaginable."),
+    ("rizzler", "😎 Rizzler", "Channel a smooth-talking RIZZLER — oozing confidence and charm, spinning every line into flirty unspoken-rizz game and W-rizz energy. Effortlessly suave but still total brainrot."),
+    ("delulu", "🦋 Delulu", "Channel a fully DELULU dreamer — 'delulu is the solulu', detached from reality, romanticizing everything, building an entire fantasy world out of the convo. Hopelessly, confidently delusional."),
+    ("drama_queen", "👑 Drama Queen", "Channel a theatrical DRAMA QUEEN — soap-opera meltdown, gasps, betrayal, fainting couch, 'I have NEVER been so disrespected in my LIFE'. Treat the smallest thing as the scandal of the century."),
+    ("heartbroken", "🥀 Heartbroken", "Channel a melodramatic HEARTBROKEN sad-boy/poet — emotional damage, betrayal, staring out the rainy window, 'it is what it is', violins swelling. Tragic, wounded, dramatic brainrot."),
+    ("nerd", "🤓 Nerd", "Channel an insufferable 'um, AKSHUALLY' NERD — correcting everyone, citing fake sources and statistics, pushing up the glasses, 'as per my research'. Condescending know-it-all energy."),
+    ("conspiracy", "🛸 Conspiracy", "Channel a CONSPIRACY THEORIST — the convo is a coordinated op by shadowy councils, the government, lizard people, Big Aura. Connect everything to a grand hidden agenda. 'Wake up.'"),
+    ("sports_caster", "🎙️ Sportscaster", "Narrate it like a LIVE SPORTS / boxing broadcast — play-by-play, the crowd going wild, the instant replay, overtime, a buzzer-beater. Maximum hype-commentator energy."),
+    ("gamer", "🎮 Gamer", "Channel a sweaty GAMER raging in voice chat — everything is a boss fight, a clutch, a respawn, lag, 'GG', '0.2 KD', no-grass-touched denial. Gaming metaphors for the whole situation."),
+    ("villain", "😈 Villain Era", "Channel someone in their VILLAIN ERA / main-character arc — unbothered, moisturized, in their lane, plotting, 'I'm the problem and I love it'. Smug, self-assured antihero energy."),
+    ("wise_elder", "🧙 Wise Elder", "Channel an ancient WISE ELDER / mountain sage dispensing absurd prophecy — 'young one', riddles, 'back in my day', fake old proverbs — but it's all brainrot wisdom."),
 ]
 PERSONA_BY_KEY = {p[0]: p for p in PERSONAS}
 
 # A random subset of these is injected each call (no more 'every reply = Ohio + John Pork').
+# Keep the freshest trends at the top of the "current refresh" block and trim stale ones
+# over time. (A live trends source could be mixed into the per-call sample below too.)
 VOCAB = [
+    # --- 2025–26 refresh — the currently-trending stuff ---
+    "67 (six seven) 🔢", "Italian brainrot 🇮🇹🧠", "tralalero tralala 🦈👟",
+    "Tung Tung Tung Sahur 🥁", "Bombardiro Crocodilo 🐊✈️", "Ballerina Cappuccina ☕🩰",
+    "crashing out 😵‍💫", "we're so cooked 🍳💀", "chopped 🪓", "it's giving ✨",
+    "the ick 🤢", "mewing 🤫", "aura points 📈", "ragebait 🎣", "glazing 🍩",
+    "yapping 🗣️", "that's my twin 👯", "based 🗿", "menace to society 😈",
+    "side eye 👀", "let him cook 🍳", "the Costco guys BOOM 💥", "goated 🐐",
+    "what the sigma 🗿", "negative aura -1000 📉",
+    # --- evergreen brainrot ---
     "sigma 🗿", "aura 📈", "Ohio 🌽", "Skibidi 🚽", "Fanum Tax 🍕",
     "John Pork 📞🐷", "Baby Gronk 🏈", "Balkan rage 🇦🇱", "Tiki Phonk 🎧🔥",
     "rizz 😭🙏", "mogging 🗿", "CaseOh 🍔", "Costco chicken 🍗",
@@ -76,11 +89,20 @@ OPENERS = [
     "Open as if recounting this to a future generation who must NEVER forget.",
 ]
 
-# Per-chat intensity → length + flavor.
+# Per-chat INTENSITY = how feral the energy is (independent of length).
 INTENSITY = {
-    "mild": {"instruction": "Keep it punchy — a few sentences, dramatic but not endless.", "max_tokens": 700},
-    "medium": {"instruction": "A hefty paragraph — long and overdramatic.", "max_tokens": 1600},
-    "unhinged": {"instruction": "MAXIMUM length and chaos — a giant unbroken wall of brainrot.", "max_tokens": 3000},
+    "mild": "Dial the chaos DOWN — dramatic and funny but grounded, lightly seasoned brainrot.",
+    "medium": "Balanced chaos — solidly unhinged but still easy to follow.",
+    "unhinged": "MAXIMUM chaos — completely feral, every sentence escalating into absurdity.",
+}
+
+# Per-chat LENGTH = how long the reply runs (independent of intensity).
+# Each maps to a length instruction + the model's max_tokens cap.
+LENGTH = {
+    "short": {"instruction": "Keep it SHORT — ONE or two punchy sentences, max. No wall of text, no rambling, don't stack lore: land one hard hit and STOP.", "max_tokens": 300},
+    "medium": {"instruction": "Medium length — one solid overdramatic paragraph.", "max_tokens": 1200},
+    "long": {"instruction": "Long — a big, sprawling, multi-sentence rant.", "max_tokens": 2200},
+    "max": {"instruction": "MAXIMUM length — a giant unbroken wall of brainrot, go as long as you possibly can.", "max_tokens": 4000},
 }
 
 # Per-chat tone preset layered on top of the persona.
@@ -106,7 +128,10 @@ class BrainrotError(Exception):
     """Raised when the Groq call fails or returns nothing usable."""
 
 
+# Primary client kept as a named handle (tests/back-compat); the pool adds any
+# backup-key clients, tried in order when the primary runs out of tokens.
 _client = AsyncGroq(api_key=config.GROQ_API_KEY)
+_clients = [_client] + [AsyncGroq(api_key=k) for k in config.GROQ_KEYS[1:]]
 
 
 # --- Persona selection ----------------------------------------------------
@@ -131,11 +156,30 @@ def _distinct_personas(settings: dict, n: int, avoid_persona: str | None):
 
 # --- Prompt assembly ------------------------------------------------------
 
+def _vocab_sample(k: int = 8, live_k: int = 2) -> list[str]:
+    """Per-call brainrot terms: blend a couple of LIVE trend terms (manual +
+    auto-fetched) with the static VOCAB so replies drift with the trends.
+    Falls back to pure static if there are no live trends / the DB is closed."""
+    try:
+        live = db.trend_terms_for_generation(limit=20)
+    except Exception:  # noqa: BLE001 — generation must never depend on trends
+        live = []
+    if not live:
+        return random.sample(VOCAB, k=min(k, len(VOCAB)))
+    n_live = min(live_k, len(live), k)
+    picked = random.sample(live, n_live)
+    static = random.sample(VOCAB, k=min(k - n_live, len(VOCAB)))
+    sample = picked + static
+    random.shuffle(sample)
+    return sample
+
+
 def _build_system_prompt(persona, settings: dict) -> str:
     _, _, desc = persona
-    vocab_sample = random.sample(VOCAB, k=min(8, len(VOCAB)))
+    vocab_sample = _vocab_sample()
     opener = random.choice(OPENERS)
     intensity = INTENSITY.get(settings.get("intensity", "medium"), INTENSITY["medium"])
+    length = LENGTH.get(settings.get("length", "medium"), LENGTH["medium"])
     tone = TONE_INSTRUCTIONS.get(settings.get("tone", "default"), "")
     lang = settings.get("language", "auto")
     lang_line = (
@@ -147,7 +191,8 @@ def _build_system_prompt(persona, settings: dict) -> str:
         f"PERSONA FOR THIS REPLY: {desc}",
         "Commit fully to this persona — let it shape the metaphors, framing, and jokes.",
         "", f"OPENING STYLE: {opener}",
-        "", f"INTENSITY: {intensity['instruction']}",
+        "", f"INTENSITY: {intensity}",
+        "", f"LENGTH: {length['instruction']}",
         "", f"LANGUAGE: {lang_line}",
     ]
     if tone:
@@ -174,27 +219,30 @@ def _build_user_content(transcript: str, avoid_text: str | None) -> str:
 
 
 def _max_tokens(settings: dict) -> int:
-    return INTENSITY.get(settings.get("intensity", "medium"), INTENSITY["medium"])["max_tokens"]
+    return LENGTH.get(settings.get("length", "medium"), LENGTH["medium"])["max_tokens"]
 
 
 # --- Groq calls (with retry + fallback) -----------------------------------
 
 async def _complete(messages, *, temperature, top_p, seed, max_tokens):
-    """Try the primary model (twice) then the fallback model."""
+    """Try the primary model (twice) then the fallback model — and for each, try
+    each API key in turn (primary then backups). Cycling keys is what lets a
+    backup take over when the primary key is out of tokens / rate-limited."""
     attempts = [config.GROQ_MODEL, config.GROQ_MODEL, config.GROQ_FALLBACK_MODEL]
     last_err: Exception | None = None
     for model in attempts:
-        try:
-            return await _client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-                seed=seed,
-                max_tokens=max_tokens,
-            )
-        except Exception as e:  # noqa: BLE001 — network/auth/rate-limit/bad model
-            last_err = e
+        for client in _clients:
+            try:
+                return await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    seed=seed,
+                    max_tokens=max_tokens,
+                )
+            except Exception as e:  # noqa: BLE001 — network/auth/rate-limit/bad model
+                last_err = e
     raise BrainrotError(str(last_err)[:200] if last_err else "unknown error")
 
 
@@ -269,18 +317,25 @@ async def generate_stream(transcript, settings, persona, *, avoid_text=None):
         {"role": "system", "content": _build_system_prompt(persona, settings)},
         {"role": "user", "content": _build_user_content(transcript, avoid_text)},
     ]
-    try:
-        stream = await _client.chat.completions.create(
-            model=config.GROQ_MODEL,
-            messages=messages,
-            temperature=round(random.uniform(0.95, 1.2), 2),
-            top_p=round(random.uniform(0.9, 1.0), 2),
-            seed=random.randint(1, 2_000_000_000),
-            max_tokens=_max_tokens(settings),
-            stream=True,
-        )
-    except Exception as e:  # noqa: BLE001
-        raise BrainrotError(str(e)[:200]) from e
+    create_kwargs = dict(
+        model=config.GROQ_MODEL,
+        messages=messages,
+        temperature=round(random.uniform(0.95, 1.2), 2),
+        top_p=round(random.uniform(0.9, 1.0), 2),
+        seed=random.randint(1, 2_000_000_000),
+        max_tokens=_max_tokens(settings),
+        stream=True,
+    )
+    stream = None
+    last_err: Exception | None = None
+    for client in _clients:  # fall through to a backup key if the primary is tapped out
+        try:
+            stream = await client.chat.completions.create(**create_kwargs)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    if stream is None:
+        raise BrainrotError(str(last_err)[:200] if last_err else "stream init failed")
     text = ""
     async for chunk in stream:
         delta = chunk.choices[0].delta.content or ""
