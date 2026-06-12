@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+*.db
+data/
+tests/
+.github/
+README.md
+WISHLIST.md
+*.bat

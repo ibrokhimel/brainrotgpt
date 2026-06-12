@@ -1,3 +1,5 @@
-python-telegram-bot[job-queue]>=21.6
-groq>=0.13.0
-python-dotenv>=1.0.0
+# Tested with the versions noted in comments; floors keep installs reproducible.
+python-telegram-bot[job-queue]>=21.6,<23   # tested 22.7
+groq>=0.13.0                                # tested 1.4.0
+python-dotenv>=1.0.0                        # tested 1.2.2
+pillow>=10.0.0                              # tested 12.2.0 (share cards; optional)

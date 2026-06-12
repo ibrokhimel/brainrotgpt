@@ -49,3 +49,28 @@ class RateLimiter:
         self._last[user_id] = now
         self._user_hits[user_id].append(now)
         self._global_hits.append(now)
+
+    def seed(self, events):
+        """Pre-populate windows from persisted (user_id, epoch) events.
+
+        Lets per-minute limits survive a restart instead of resetting to zero.
+        Wall-clock epochs are mapped into the monotonic-clock domain.
+        """
+        if not events:
+            return
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        for user_id, ts in events:
+            mono = now_mono - (now_wall - ts)
+            self._user_hits[user_id].append(mono)
+            self._global_hits.append(mono)
+            last = self._last.get(user_id)
+            if last is None or mono > last:
+                self._last[user_id] = mono
+        for dq in self._user_hits.values():
+            dq_sorted = deque(sorted(dq))
+            dq.clear()
+            dq.extend(dq_sorted)
+        g = deque(sorted(self._global_hits))
+        self._global_hits.clear()
+        self._global_hits.extend(g)
