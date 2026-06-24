@@ -1,0 +1,13 @@
+services:
+  brainrotgpt:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/brainrot.db
+    volumes:
+      - ./data:/app/data        # persists settings/favorites/analytics
+    # Uncomment to expose the health endpoint / webhook port:
+    # ports:
+    #   - "8080:8080"           # set HEALTH_PORT=8080 in .env
+    #   - "8443:8443"           # set WEBHOOK_PORT=8443 in .env for webhook mode

@@ -4,3 +4,10 @@ venv/
 __pycache__/
 *.pyc
 *.log
+
+# Runtime data
+*.db
+*.db-journal
+data/
+.pytest_cache/
+.ruff_cache/
