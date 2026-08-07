@@ -45,20 +45,39 @@ def test_candidates_exclude_muted_gaveup_and_already_scheduled(tmp_path):
                                   quiet_for_s=18 * 3600) == []
 
 
+class _FixedRng:
+    """rng stub with a fixed random() — makes the probability gate deterministic."""
+    def __init__(self, value):
+        self.value = value
+
+    def random(self):
+        return self.value
+
+    def uniform(self, a, b):
+        return a + (b - a) * self.value
+
+
 def test_should_cold_open_is_false_while_asleep():
+    # Fixed at 0.0 (a roll that would otherwise always fire) proves the sleep
+    # guard wins regardless of the roll — stronger than a real rng, which could
+    # pass here for the wrong reason (rolling above threshold, not sleep).
     state = {"chattiness": "normal"}
-    assert not ghost.should_cold_open(state, _at(10, 3), rng=random.Random(0))
+    assert not ghost.should_cold_open(state, _at(10, 3), rng=_FixedRng(0.0))
 
 
-def test_should_cold_open_fires_sometimes_when_awake():
-    state = {"chattiness": "normal"}
-    # Per-tick chance is intentionally tiny (~0.33/1440, see ghost.should_cold_open)
-    # so it doesn't fire hundreds of times a day. 300 trials undersamples that —
-    # expected hits ~0.07, so it's ~93% likely to see zero. Use enough trials for
-    # a reliable "fires sometimes" signal without touching the probability itself.
-    fired = sum(ghost.should_cold_open(state, _at(10, 14), rng=random.Random(i))
-                for i in range(50_000))
-    assert 0 < fired < 50_000
+def test_should_cold_open_fires_when_the_roll_is_below_the_threshold():
+    assert ghost.should_cold_open({"chattiness": "normal"}, _at(10, 14), rng=_FixedRng(0.0))
+
+
+def test_should_cold_open_does_not_fire_when_the_roll_is_above_the_threshold():
+    assert not ghost.should_cold_open({"chattiness": "normal"}, _at(10, 14), rng=_FixedRng(0.5))
+
+
+def test_clingy_has_a_higher_cold_open_threshold_than_chill():
+    # a roll that fires for clingy must not fire for chill
+    roll = _FixedRng(ghost.COLDOPEN_CHANCE_BY_CHATTINESS["chill"] / (24 * 60) * 1.5)
+    assert ghost.should_cold_open({"chattiness": "clingy"}, _at(10, 14), rng=roll)
+    assert not ghost.should_cold_open({"chattiness": "chill"}, _at(10, 14), rng=roll)
 
 
 def test_cold_open_at_lands_in_waking_hours():
