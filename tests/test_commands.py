@@ -242,6 +242,9 @@ def test_an_expired_flag_does_not_capture(monkeypatch):
 
 
 def test_a_sticker_with_no_set_name_is_handled_without_changing_the_current_pack(monkeypatch):
+    """A failed attempt must leave the flag armed — the natural next move is
+    to send a different sticker, and re-typing /stickers is friction the
+    owner shouldn't need at exactly the moment they're already confused."""
     _owner_only(monkeypatch)
     db.set_kid_state(stickers.STICKER_PACK_KEY, "existing")
     stickers.arm_capture()
@@ -250,7 +253,23 @@ def test_a_sticker_with_no_set_name_is_handled_without_changing_the_current_pack
 
     handled = _run(commands.try_capture_sticker(update, ctx))
 
-    assert handled is True  # consumed the capture attempt, just not a load
+    assert handled is True  # consumed this attempt, just not a load
     assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "existing"
     assert ctx.bot.requested is None
-    assert not stickers.capture_pending()
+    assert stickers.capture_pending()  # still waiting for a valid one
+    assert "another" in update.message.replies[0].lower() or "try" in update.message.replies[0].lower()
+
+
+def test_a_load_failure_during_capture_leaves_the_flag_armed_for_a_retry(monkeypatch):
+    _owner_only(monkeypatch)
+    stickers.arm_capture()
+    update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name="badpack"))
+    ctx = _FakeContext(bot_obj=FakeBot(fail=True))
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is True
+    assert not stickers.enabled()
+    assert stickers.capture_pending()  # still waiting — send another sticker, no need to retype
+    reply = update.message.replies[0].lower()
+    assert "couldn't" in reply or "fail" in reply

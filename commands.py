@@ -244,32 +244,34 @@ async def try_capture_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE
     pack off this sticker and load it — instead of the sticker being treated
     as an ordinary message. See stickers.capture_pending() for the window.
 
-    Single-shot: the flag clears on this attempt whether it succeeds, the
-    pack fails to load, or the sticker isn't part of a pack at all — a fresh
-    /stickers re-arms it. Returns whether this sticker was consumed as a
-    capture attempt; bot.on_sticker falls through to ordinary intake when
-    this returns False (not owner, or nothing pending).
+    Only a *successful* load disarms the flag. On failure (no set_name, or
+    the pack doesn't load) it stays armed so the owner can just send a
+    different sticker instead of re-typing /stickers — the CAPTURE_WINDOW_S
+    expiry is what bounds it, not a single-attempt limit. Returns whether
+    this sticker was consumed as a capture attempt; bot.on_sticker falls
+    through to ordinary intake when this returns False (not owner, or
+    nothing pending).
     """
     msg = update.message
     user_id = msg.from_user.id if msg.from_user else 0
     if not (guard.is_owner(user_id) and stickers.capture_pending()):
         return False
-    stickers.disarm_capture()
 
     set_name = msg.sticker.set_name
     if not set_name:
         await update.message.reply_text(
-            "that one's not part of a pack i can read 🤷 — try a sticker from the actual pack"
+            "that one's not part of a pack i can read 🤷 — still waiting, try another sticker from it"
         )
         return True
 
     db.set_kid_state(stickers.STICKER_PACK_KEY, set_name)
     count = await stickers.load(context.bot)
     if count:
+        stickers.disarm_capture()
         await update.message.reply_text(f"pack set ✅ {set_name} — loaded {count} sticker(s)")
     else:
         await update.message.reply_text(
-            f"couldn't load pack {set_name} 😭 (bad name, or it's empty) — stickers off for now"
+            f"couldn't load pack {set_name} 😭 (bad name, or it's empty) — still waiting, try another sticker"
         )
     return True
 
