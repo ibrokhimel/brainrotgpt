@@ -13,7 +13,12 @@ import time
 
 import config
 
-_lock = threading.Lock()
+# Reentrant on purpose: every accessor calls _db() *inside* `with _lock`, and
+# _db() falls back to init_db() when the connection is closed, which takes the
+# lock again. On a plain Lock that lazy-init path can only ever hang -- and a
+# hung process under restartPolicy "always" is never restarted, because the
+# supervisor still sees it running.
+_lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
 
 
@@ -331,15 +336,20 @@ def update_chat_state(chat_id: int, **fields) -> dict:
         raise ValueError(f"unknown chat_state column(s): {sorted(bad)}")
     if not fields:
         return get_chat_state(chat_id)
-    get_chat_state(chat_id)  # ensure the row exists
     assigns = ", ".join(f"{k}=?" for k in fields)
+    # One lock for the whole read-modify-write. It used to take three (two
+    # get_chat_state calls bracketing the UPDATE), which let a concurrent
+    # writer interleave between the row-create and the read-back.
     with _lock:
-        _db().execute(
+        conn = _db()
+        conn.execute("INSERT OR IGNORE INTO chat_state (chat_id) VALUES (?)", (chat_id,))
+        conn.execute(
             f"UPDATE chat_state SET {assigns} WHERE chat_id=?",
             (*fields.values(), chat_id),
         )
-        _db().commit()
-    return get_chat_state(chat_id)
+        conn.commit()
+        row = conn.execute("SELECT * FROM chat_state WHERE chat_id=?", (chat_id,)).fetchone()
+    return dict(row)
 
 
 def due_chats(now: float) -> list[dict]:

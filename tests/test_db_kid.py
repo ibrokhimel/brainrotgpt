@@ -1,3 +1,6 @@
+import threading
+
+import config
 import db
 
 
@@ -97,3 +100,69 @@ def test_trend_memes_excludes_blurbless_and_banned(tmp_path):
     db.add_trend("banned meme", blurb="x", kind="meme")
     db.ban_trend("banned meme")
     assert db.trend_memes_for_generation() == []
+
+
+# --- lock discipline --------------------------------------------------------
+
+class _CountingLock:
+    """Wraps the real lock and counts acquisitions, so a test can assert how
+    many times a single call re-enters it."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.acquires = 0
+
+    def __enter__(self):
+        self.acquires += 1
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+
+def test_lazy_init_after_close_does_not_deadlock(tmp_path, monkeypatch):
+    """Every accessor calls _db() *inside* `with _lock`, and _db() calls
+    init_db() when _conn is None -- which takes _lock again. On a plain
+    threading.Lock that is a permanent hang, not a crash.
+
+    The reachable window in production is anything touching the DB after
+    on_shutdown's db.close(). Under a supervisor with restartPolicy "always" a
+    hung process is not a dead one, so it is never restarted: silent, permanent,
+    green dashboard.
+
+    Run on a worker thread with a join timeout, because on the buggy code the
+    call never returns. The lock is swapped for a fresh one before asserting so
+    a failure here cannot wedge the rest of the suite behind the stuck thread.
+    """
+    _fresh(tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "lazy.db"))
+    db.close()                       # _conn is None; the next call must re-init
+    result = {}
+
+    def worker():
+        result["state"] = db.get_chat_state(1)   # hangs on a non-reentrant lock
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    hung = t.is_alive()
+    if hung:
+        # The stuck thread owns the old lock forever; hand the module a fresh
+        # one so the remaining tests aren't blocked behind it.
+        db._lock = threading.RLock()
+    assert not hung, "DEADLOCKED: _db() re-entered _lock via init_db()"
+    assert result["state"]["chat_id"] == 1
+
+
+def test_update_chat_state_takes_the_lock_once(tmp_path, monkeypatch):
+    """It used to take _lock three times -- two get_chat_state calls bracketing
+    the UPDATE -- so the read-modify-write was not atomic against a concurrent
+    writer, and it paid three round trips for one logical write."""
+    _fresh(tmp_path)
+    db.get_chat_state(1)             # create the row outside the measurement
+    counter = _CountingLock(db._lock)
+    monkeypatch.setattr(db, "_lock", counter)
+    db.update_chat_state(1, bond=7)
+
+    assert counter.acquires == 1
+    assert db.get_chat_state(1)["bond"] == 7
