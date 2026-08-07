@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import hashlib
 import logging
+import random
 import socket
 import time
 from collections import deque
@@ -34,12 +35,17 @@ from telegram.ext import (
 import brainrot
 import config
 import db
+import ghost
 import guard
 import health
+import life
+import scheduler
+import stickers
 import trends
 import vision
 from brainrot import PERSONA_BY_KEY, PERSONAS
 from rate_limit import RateLimiter
+from scheduler import BOND_GAVE_UP, BOND_GHOST_STAGE, pings_remaining  # noqa: F401 — re-exported
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -64,7 +70,6 @@ limiter = RateLimiter(
 TG_LIMIT = 4096          # Telegram max message length
 MSG_CAP = 3900           # leave room for footer + buttons in the controls message
 DEBOUNCE_S = 1.5         # wait after the last message before showing the confirm card
-SESSION_TTL_S = 1800     # evict idle buffers after 30 min
 
 INTENSITY_LABELS = {"mild": "🌶 Mild", "medium": "🔥 Medium", "unhinged": "☢️ Unhinged"}
 LENGTH_LABELS = {"short": "💬 Short", "medium": "📄 Medium", "long": "📜 Long", "max": "🧱 Max"}
@@ -406,21 +411,69 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --- Message intake + debounce -------------------------------------------
+# --- Message intake --------------------------------------------------------
 
-async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+BOND_PER_MESSAGE = 1
+BOND_LONG_MESSAGE = 3
+LONG_MESSAGE_CHARS = 200
+LOW_CONTENT = {"lol", "ok", "okay", "k", "lmao", "yeah", "yea", "no", "nah", "haha", "true"}
+
+_rng = random.Random()
+
+
+def apply_bond(state: dict, text: str) -> int:
+    delta = BOND_LONG_MESSAGE if len(text) >= LONG_MESSAGE_CHARS else BOND_PER_MESSAGE
+    return max(-100, min(100, int(state.get("bond") or 0) + delta))
+
+
+def is_low_content(text: str) -> bool:
+    stripped = text.strip().lower()
+    return len(stripped) <= 4 or stripped in LOW_CONTENT
+
+
+async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A real person texted. Record it, reset the ghost ladder, schedule a reply."""
     msg = update.message
     if msg is None:
         return
     text = msg.text or msg.caption
     if not text:
-        await msg.reply_text("send me text, a screenshot 📸, or forwarded messages 🙏")
         return
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
-    session["buffer"].append(
-        {"sender": sender_name(msg) if is_forwarded(msg) else None, "text": text}
-    )
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        return
+    ok, _ = guard.screen_input(text)
+    if not ok:
+        return
+    # Protects the Groq quota from a chatty/abusive user. A refusal is silent —
+    # a person who's tapped out just doesn't answer; the bot never explains.
+    allowed, _ = limiter.check(user_id)
+    if not allowed:
+        return
+
+    now = time.time()
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
+        return
+    db.add_message(chat_id, "user", text)
+    limiter.record(user_id)
+
+    engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < 120)
+    salty = bool(state["gave_up"])          # they're back after being given up on
+    fields = {
+        "bond": apply_bond(state, text) + (BOND_GAVE_UP if salty else 0),
+        "ping_stage": 0,
+        "last_user_ts": now,
+        "msgs_since_notes": int(state["msgs_since_notes"] or 0) + 1,
+        "next_action_kind": "reply",
+        "next_action_at": ghost.schedule_reply_at(
+            now, engaged=engaged, bond=int(state["bond"] or 0),
+            salty=bool(state["salty"]), rng=_rng),
+    }
+    if salty:
+        fields.update(gave_up=0, salty=1)
+    db.update_chat_state(chat_id, **fields)
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -575,44 +628,41 @@ async def on_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# --- Scheduled jobs -------------------------------------------------------
-
-async def cleanup_sessions(context: ContextTypes.DEFAULT_TYPE):
-    now = time.time()
-    stale = [cid for cid, s in sessions.items() if now - s.get("ts", now) > SESSION_TTL_S]
-    for cid in stale:
-        sessions.pop(cid, None)
-    if stale:
-        logger.info("cleaned %d idle session(s)", len(stale))
-
-
-async def trend_refresh_job(context: ContextTypes.DEFAULT_TYPE):
-    """Scheduled best-effort pull of fresh slang into the live trends table."""
-    try:
-        n = await trends.refresh()
-        logger.info("scheduled trend refresh added %d term(s)", n)
-    except Exception as e:  # noqa: BLE001 — never let the job crash the queue
-        logger.warning("trend refresh job failed: %s", e)
-
-
 # --- Lifecycle ------------------------------------------------------------
+#
+# The kid's own schedule (the 60s tick, burst delivery, daily jobs) lives in
+# scheduler.py — see that module's docstring for why. bot.py only registers it.
 
 async def on_startup(app: Application):
     db.init_db()
     limiter.seed(db.recent_generation_times(60))
-    app.job_queue.run_repeating(cleanup_sessions, interval=600, first=600)
-    if config.TREND_FETCH_ENABLED:
-        app.job_queue.run_daily(
-            trend_refresh_job,
-            time=datetime.time(hour=config.TREND_FETCH_HOUR % 24),
-            name="trend_refresh",
-        )
-        if db.count_trends(source="auto") == 0:  # seed shortly after first boot
-            app.job_queue.run_once(trend_refresh_job, when=120, name="trend_refresh_seed")
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception as e:  # noqa: BLE001
         logger.warning("failed to set command menu: %s", e)
+    await stickers.load(app.bot)
+
+    app.job_queue.run_repeating(scheduler.tick, interval=60, first=10, name="tick")
+    app.job_queue.run_repeating(
+        scheduler.cleanup_sessions, interval=600, first=600, data=sessions)
+    app.job_queue.run_daily(
+        scheduler.life_refresh_job,
+        time=datetime.time(hour=config.LIFE_REFRESH_HOUR % 24),
+        name="life_refresh",
+    )
+    app.job_queue.run_daily(
+        scheduler.sticker_reload_job, time=datetime.time(hour=4), name="sticker_reload")
+    if config.TREND_FETCH_ENABLED:
+        app.job_queue.run_daily(
+            scheduler.trend_refresh_job,
+            time=datetime.time(hour=config.TREND_FETCH_HOUR % 24),
+            name="trend_refresh",
+        )
+        if db.count_trends(source="auto") == 0:  # seed shortly after first boot
+            app.job_queue.run_once(scheduler.trend_refresh_job, when=120, name="trend_refresh_seed")
+    if not life.current():
+        app.job_queue.run_once(scheduler.life_refresh_job, when=30, name="life_seed")
+
     logger.info("startup complete (model=%s, fallback=%s)", config.GROQ_MODEL, config.GROQ_FALLBACK_MODEL)
 
 
@@ -687,14 +737,12 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(InlineQueryHandler(on_inline))
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), on_photo
-    ))
+        filters.ChatType.PRIVATE & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+        on_user_message))
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, on_message
-    ))
+        filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), on_photo))
     app.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_group_message
-    ))
+        filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION), on_group_message))
     app.add_error_handler(on_error)
 
     if config.WEBHOOK_URL:
