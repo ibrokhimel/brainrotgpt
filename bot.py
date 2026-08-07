@@ -111,6 +111,11 @@ def is_low_content(text: str) -> bool:
     return len(stripped) <= 4 or stripped in LOW_CONTENT
 
 
+# Scheduled actions that mean "the kid still owes this person an answer".
+# A reaction must never cancel one of these — see intake_fields.
+OWED_REPLY_KINDS = ("reply", scheduler.RETRY_KIND)
+
+
 def intake_fields(state: dict, now: float, *, bond: int, engaged: bool,
                   schedule: bool = True) -> dict:
     """The chat_state changes that every message from a real person makes.
@@ -123,8 +128,9 @@ def intake_fields(state: dict, now: float, *, bond: int, engaged: bool,
     — unreachable in either direction, permanently.
 
     Spec §6: any message from you resets `ping_stage` and clears the pending
-    action. `schedule=False` means "clear it and arm nothing" — the reaction
-    path, where the reaction *is* the reply.
+    action. `schedule=False` is the reaction path, where the reaction *is* the
+    answer to this message — see below for exactly what it does and doesn't
+    cancel.
 
     Note `bond` is passed in already clamped by `apply_bond`. The give-up
     penalty is NOT re-applied here: `scheduler._do_ping` charges it once, at
@@ -138,13 +144,22 @@ def intake_fields(state: dict, now: float, *, bond: int, engaged: bool,
         "ping_stage": 0,
         "last_user_ts": now,
         "msgs_since_notes": int(state["msgs_since_notes"] or 0) + 1,
-        "next_action_kind": "reply" if schedule else None,
+    }
+    if schedule:
+        fields["next_action_kind"] = "reply"
         # bot.py reads `life` and hands ghost the answer, so ghost.py stays a
         # pure function of (state, now, rng) with no DB behind it.
-        "next_action_at": ghost.schedule_reply_at(
+        fields["next_action_at"] = ghost.schedule_reply_at(
             now, engaged=engaged, bond=bond, salty=salty, rng=_rng,
-            in_school=life.in_school_block(now)) if schedule else None,
-    }
+            in_school=life.in_school_block(now))
+    elif state["next_action_kind"] not in OWED_REPLY_KINDS:
+        # A reaction cancels a ping or a cold open: both exist to chase someone
+        # who has gone quiet, and someone who just reacted has not. It must NOT
+        # cancel a pending reply, which is the opposite — a debt the kid owes
+        # for an EARLIER message. Reacting to a double-texted "lol" used to
+        # silently delete the answer to the real message before it.
+        fields["next_action_kind"] = None
+        fields["next_action_at"] = None
     if salty:
         fields.update(gave_up=0, salty=1)
     return fields
@@ -201,6 +216,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scheduling path as a text message. No status message: a person doesn't
     narrate that they're looking at your photo."""
     msg = update.message
+    if msg is None:
+        return          # an edited_message arrives with update.message unset
     chat_id = update.effective_chat.id
     user_id = msg.from_user.id if msg.from_user else 0
     if not guard.is_allowed_user(user_id):

@@ -4,6 +4,7 @@ import time
 import bot
 import burst
 import db
+import scheduler
 
 
 def _fresh(tmp_path):
@@ -439,3 +440,72 @@ def test_intake_consults_the_school_block(tmp_path, monkeypatch):
     _run(bot.on_user_message(_FakeUpdate(msg, 506), _FakeContext()))
 
     assert seen["in_school"] is True
+
+
+def test_reaction_does_not_cancel_a_reply_the_kid_still_owes(tmp_path, monkeypatch):
+    """A reaction answers THIS message. It must not delete the reply the kid
+    still owes for an EARLIER one.
+
+    The sequence is ordinary: a substantive message arms a reply 20-90s out,
+    then the user double-texts "lol" before it fires. C2 only ever required
+    disarming a *ping* -- a ping chases someone who has gone quiet, and someone
+    who just reacted has not. A pending reply is the opposite: it is a debt.
+    """
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 0.0)     # force the reaction branch
+    monkeypatch.setattr(bot._rng, "choice", lambda seq: seq[0])
+    chat_id = 507
+    due = time.time() + 45
+    db.update_chat_state(chat_id, next_action_at=due, next_action_kind="reply")
+    msg = _FakeMessage(text="lol", from_user=_FakeUser(5070))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    assert msg.reactions                            # it really took the reaction branch
+    state = db.get_chat_state(chat_id)
+    assert state["next_action_at"] == due, "the owed reply was silently discarded"
+    assert state["next_action_kind"] == "reply"
+
+
+def test_reaction_does_not_cancel_a_pending_reply_retry(tmp_path, monkeypatch):
+    """A retry is an owed reply too -- one whose first attempt already failed."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 0.0)
+    monkeypatch.setattr(bot._rng, "choice", lambda seq: seq[0])
+    chat_id = 508
+    due = time.time() + 60
+    db.update_chat_state(chat_id, next_action_at=due, next_action_kind=scheduler.RETRY_KIND)
+    msg = _FakeMessage(text="ok", from_user=_FakeUser(5080))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    state = db.get_chat_state(chat_id)
+    assert state["next_action_at"] == due
+    assert state["next_action_kind"] == scheduler.RETRY_KIND
+
+
+def test_reaction_disarms_a_pending_cold_open(tmp_path, monkeypatch):
+    """A cold open is the kid texting first. The user just texted, so it is
+    moot -- same reasoning as the ping, opposite of the owed reply."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 0.0)
+    monkeypatch.setattr(bot._rng, "choice", lambda seq: seq[0])
+    chat_id = 509
+    db.update_chat_state(chat_id, next_action_at=time.time() + 600, next_action_kind="coldopen")
+    msg = _FakeMessage(text="lol", from_user=_FakeUser(5090))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    state = db.get_chat_state(chat_id)
+    assert state["next_action_at"] is None
+    assert state["next_action_kind"] is None
+
+
+def test_on_photo_ignores_an_edited_message_with_no_message_object(tmp_path):
+    """allowed_updates=ALL_TYPES means an edited_message arrives with
+    update.message None. on_user_message and on_group_message both guard it."""
+    _fresh(tmp_path)
+
+    class _EditedUpdate:
+        message = None
+        effective_chat = _FakeChat(810)
+
+    _run(bot.on_photo(_EditedUpdate(), _FakeContext(_PhotoBot())))   # must not raise
+    assert db.get_chat_state(810)["next_action_at"] is None
