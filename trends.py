@@ -35,6 +35,8 @@ _DENY = (
 # A clean slang term is short, mostly word characters, no URLs or sentences.
 _TERM_OK = re.compile(r"^[#@]?[\w][\w '/-]{0,38}$")
 
+MAX_BLURB = 160
+
 
 def _is_safe(term: str) -> bool:
     t = term.lower()
@@ -62,6 +64,29 @@ def _parse_terms(raw: str) -> list[str]:
     return out
 
 
+def _parse_items(raw: str) -> list[dict]:
+    """Parse `term :: what it is` lines into clean, deduped, safe items."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for line in (raw or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*•]\s*|\d+[.)]\s+)", "", line).strip()
+        if not line:
+            continue
+        term, _, blurb = line.partition("::")
+        term = term.strip().strip('"').strip("'")
+        blurb = blurb.strip().strip('"')[:MAX_BLURB]
+        if not term or len(term) > 40 or (" " in term and len(term.split()) > 3):
+            continue
+        if not _TERM_OK.match(term) or not _is_safe(term) or not _is_safe(blurb):
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"term": term, "blurb": blurb})
+    return out
+
+
 async def _fetch_reddit_titles(subreddits, per: int = 25, timeout: float = 10.0) -> list[str]:
     titles: list[str] = []
     headers = {"User-Agent": "brainrotgpt/1.0 (trend refresh; contact: bot owner)"}
@@ -85,17 +110,45 @@ async def _fetch_reddit_titles(subreddits, per: int = 25, timeout: float = 10.0)
     return titles
 
 
-async def _extract_terms(titles: list[str]) -> list[str]:
+KYM_URL = "https://knowyourmeme.com/memes/popular"
+
+
+async def _fetch_kym_titles(limit: int = 25) -> list[str]:
+    """Meme NAMES from Know Your Meme's popular page — curated, not slang soup."""
+    if not config.KYM_FETCH_ENABLED:
+        return []
+    headers = {"User-Agent": "brainrotgpt/1.0 (trend refresh; contact: bot owner)"}
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=10.0) as cx:
+            r = await cx.get(KYM_URL)
+            r.raise_for_status()
+            names = re.findall(r'<a[^>]+href="/memes/[^"]+"[^>]*>([^<]{3,60})</a>', r.text)
+    except Exception as e:  # noqa: BLE001 — a dead source yields fewer terms, never an error
+        logger.warning("KYM fetch failed: %s", e)
+        return []
+    seen, out = set(), []
+    for n in names:
+        n = n.strip()
+        if n and n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out[:limit]
+
+
+_EXTRACT_PROMPT = (
+    "Below are recent social-media post titles and meme names. List the current "
+    "Gen-Z / brainrot / TikTok memes and slang that appear.\n\n"
+    "Format: ONE PER LINE as `term :: one short plain-English line saying what it "
+    "is and why it's funny`. Max 12 words in the explanation. No numbering, no "
+    "extra commentary. Skip anything sexual, hateful, violent, or about self-harm."
+    "\n\nTITLES:\n{sample}"
+)
+
+
+async def _extract_items(titles: list[str]) -> list[dict]:
     if not titles:
         return []
-    sample = "\n".join(titles[:80])
-    prompt = (
-        "Below are recent social-media post titles. Extract the current Gen-Z / "
-        "brainrot / TikTok-meme SLANG TERMS or meme names that appear or are clearly "
-        "implied. Return ONLY a comma-separated list of short terms (1-3 words each) "
-        "— no numbering, no explanations, no sentences. Skip anything sexual, hateful, "
-        "violent, or about self-harm.\n\nTITLES:\n" + sample
-    )
+    prompt = _EXTRACT_PROMPT.format(sample="\n".join(titles[:80]))
     raw = ""
     last_err: Exception | None = None
     for client in _clients:  # fall through to a backup key if the primary is tapped out
@@ -104,7 +157,7 @@ async def _extract_terms(titles: list[str]) -> list[str]:
                 model=config.GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.4,
-                max_tokens=300,
+                max_tokens=600,
             )
             raw = resp.choices[0].message.content or ""
             break
@@ -113,25 +166,30 @@ async def _extract_terms(titles: list[str]) -> list[str]:
     if last_err is not None and not raw:
         logger.warning("trend extraction failed on all keys: %s", last_err)
         return []
-    return _parse_terms(raw)
+    return _parse_items(raw)
 
 
 async def refresh(limit: int | None = None) -> int:
-    """Fetch → extract → store. Returns the number of NEW terms added."""
+    """Fetch → extract → store. Returns the number of NEW items added."""
     if not config.TREND_FETCH_ENABLED:
         return 0
     limit = config.TREND_MAX_ADD if limit is None else limit
     titles = await _fetch_reddit_titles(config.TREND_SUBREDDITS)
-    terms = await _extract_terms(titles)
-    if not terms:
-        logger.info("trend refresh: no terms (titles=%d)", len(titles))
+    try:
+        titles += await _fetch_kym_titles()
+    except Exception as e:  # noqa: BLE001 — one dead source must not kill the refresh
+        logger.warning("KYM source skipped: %s", e)
+    items = await _extract_items(titles)
+    if not items:
+        logger.info("trend refresh: no items (titles=%d)", len(titles))
         return 0
     banned = db.banned_trend_terms()
     added = 0
-    for t in terms[:limit]:
-        if t.lower() in banned:
+    for item in items[:limit]:
+        if item["term"].lower() in banned:
             continue
-        if db.add_trend(t, source="auto"):
+        kind = "meme" if item["blurb"] else "term"
+        if db.add_trend(item["term"], source="auto", blurb=item["blurb"], kind=kind):
             added += 1
-    logger.info("trend refresh: +%d new term(s) from %d titles", added, len(titles))
+    logger.info("trend refresh: +%d new item(s) from %d titles", added, len(titles))
     return added

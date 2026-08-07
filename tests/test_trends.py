@@ -42,11 +42,15 @@ def test_refresh_stores_terms(monkeypatch):
     async def fake_titles(*a, **k):
         return ["67 is everywhere", "the tralalero tralala arc"]
 
+    async def fake_kym(limit=25):
+        return []
+
     async def fake_extract(titles):
-        return ["67", "tralalero tralala", "chopped"]
+        return [{"term": "67", "blurb": ""}, {"term": "tralalero tralala", "blurb": ""}, {"term": "chopped", "blurb": ""}]
 
     monkeypatch.setattr(trends, "_fetch_reddit_titles", fake_titles)
-    monkeypatch.setattr(trends, "_extract_terms", fake_extract)
+    monkeypatch.setattr(trends, "_fetch_kym_titles", fake_kym)
+    monkeypatch.setattr(trends, "_extract_items", fake_extract)
     db.ban_trend("chopped")  # banned terms must be skipped by the fetcher
 
     added = asyncio.run(trends.refresh())
@@ -68,3 +72,78 @@ def test_vocab_sample_blends_live_trends():
     sample = brainrot._vocab_sample(k=8, live_k=2)
     assert len(sample) == 8
     assert any(s.startswith("zzlivetrend") for s in sample)  # at least one live term
+
+
+def test_parse_items_splits_term_and_blurb():
+    raw = "67 :: a number people yell for no reason\nchopped :: means ugly or bad"
+    items = trends._parse_items(raw)
+    assert items[0] == {"term": "67", "blurb": "a number people yell for no reason"}
+    assert items[1]["term"] == "chopped"
+
+
+def test_parse_items_keeps_terms_without_a_blurb():
+    items = trends._parse_items("gyatt\nrizz :: charisma")
+    assert {"term": "gyatt", "blurb": ""} in items
+
+
+def test_parse_items_drops_unsafe_terms():
+    items = trends._parse_items("porn stuff :: bad\nrizz :: charisma")
+    assert [i["term"] for i in items] == ["rizz"]
+
+
+def test_parse_items_drops_overlong_blurbs():
+    items = trends._parse_items("rizz :: " + "x" * 400)
+    assert len(items[0]["blurb"]) <= trends.MAX_BLURB
+
+
+def test_parse_items_dedupes_case_insensitively():
+    items = trends._parse_items("Rizz :: a\nrizz :: b")
+    assert len(items) == 1
+
+
+def test_refresh_stores_memes_with_blurbs(tmp_path, monkeypatch):
+    import asyncio
+
+    import db
+    db.close()
+    db.init_db(str(tmp_path / "tr.db"))
+
+    async def fake_titles(subs, per=25, timeout=10.0):
+        return ["what does 67 mean"]
+
+    async def fake_kym(limit=25):
+        return ["Skibidi Toilet"]
+
+    async def fake_extract(titles):
+        return [{"term": "67", "blurb": "a number people yell"}]
+
+    monkeypatch.setattr(trends, "_fetch_reddit_titles", fake_titles)
+    monkeypatch.setattr(trends, "_fetch_kym_titles", fake_kym)
+    monkeypatch.setattr(trends, "_extract_items", fake_extract)
+    added = asyncio.run(trends.refresh())
+    assert added == 1
+    memes = db.trend_memes_for_generation()
+    assert memes[0]["term"] == "67"
+    assert memes[0]["blurb"] == "a number people yell"
+
+
+def test_refresh_survives_a_dead_kym(tmp_path, monkeypatch):
+    import asyncio
+
+    import db
+    db.close()
+    db.init_db(str(tmp_path / "tr2.db"))
+
+    async def fake_titles(subs, per=25, timeout=10.0):
+        return ["what does 67 mean"]
+
+    async def dead_kym(limit=25):
+        raise RuntimeError("kym down")
+
+    async def fake_extract(titles):
+        return [{"term": "67", "blurb": "a number"}]
+
+    monkeypatch.setattr(trends, "_fetch_reddit_titles", fake_titles)
+    monkeypatch.setattr(trends, "_fetch_kym_titles", dead_kym)
+    monkeypatch.setattr(trends, "_extract_items", fake_extract)
+    assert asyncio.run(trends.refresh()) == 1
