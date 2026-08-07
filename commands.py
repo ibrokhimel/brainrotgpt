@@ -222,3 +222,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("kid:"):
         await handle_settings_cb(query, chat_id, data)
+        return
+
+    # Always answer, even for callback data we no longer understand. Live users
+    # have v2 messages in scrollback with set:* / v:* buttons; an unanswered
+    # callback leaves their client spinning until it times out. Upgrade-day
+    # symptom, two lines.
+    await query.answer()

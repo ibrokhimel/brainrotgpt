@@ -166,15 +166,18 @@ def _context(state: dict, *, rng, target: int) -> str:
 
 async def _generate(system: str, user: str, *, model, temperature, max_tokens,
                     max_msgs: int) -> list[burst.Piece]:
+    # burst.parse is inside the try on purpose: it runs regexes over untrusted
+    # model output, so it is part of "generation", and a parse failure must go
+    # quiet exactly like a network failure rather than raise into the bot.
     try:
         raw = await _complete(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             model=model, temperature=temperature, max_tokens=max_tokens,
         )
+        return burst.parse(raw, max_msgs=max_msgs)
     except Exception as e:  # noqa: BLE001 — the kid goes quiet, it never errors at you
         logger.warning("generation failed: %s", e)
         return []
-    return burst.parse(raw, max_msgs=max_msgs)
 
 
 async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:

@@ -4,18 +4,6 @@ from telegram.error import Conflict
 
 import bot
 
-
-def test_split_text_short_is_single():
-    assert bot.split_text("hello") == ["hello"]
-
-
-def test_split_text_long_splits_under_limit():
-    text = "word " * 2000  # ~10k chars
-    chunks = bot.split_text(text, limit=4096)
-    assert len(chunks) > 1
-    assert all(len(c) <= 4096 for c in chunks)
-
-
 # --- group mode helpers ---------------------------------------------------
 
 class _Ent:

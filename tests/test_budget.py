@@ -49,3 +49,11 @@ def test_zero_budget_means_unlimited(tmp_path):
     for _ in range(50):
         budget.spend(_at(8))
     assert budget.can_spend(_at(8))
+
+
+def test_remaining_and_can_spend_agree_that_zero_means_unlimited(tmp_path, monkeypatch):
+    """They used to disagree: can_spend said "go ahead", remaining said "0 left"."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(budget.config, "OUTBOUND_DAILY_BUDGET", 0)
+    assert budget.can_spend(_at(8)) is True
+    assert budget.remaining(_at(8)) < 0        # negative = unlimited, not exhausted

@@ -28,8 +28,11 @@ def _spent(now: float) -> int:
 
 
 def remaining(now: float) -> int:
+    """Calls left today. A budget of 0 or less means unlimited, so this reports
+    -1 rather than 0 — the two used to disagree at zero, where `can_spend` said
+    "go ahead" and this said "nothing left"."""
     if config.OUTBOUND_DAILY_BUDGET <= 0:
-        return config.OUTBOUND_DAILY_BUDGET or 0
+        return -1
     return max(0, config.OUTBOUND_DAILY_BUDGET - _spent(now))
 
 

@@ -105,3 +105,21 @@ def test_generation_failure_yields_no_pieces_not_an_exception(tmp_path, monkeypa
 
     monkeypatch.setattr(chat_engine, "_complete", boom)
     assert _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0))) == []
+
+
+def test_generate_never_raises_when_the_model_returns_unparseable_output(monkeypatch):
+    """_generate wrapped only the _complete call, so burst.parse ran outside
+    the try -- and parse runs regexes over untrusted model output. The
+    "the kid goes quiet, it never errors at you" guarantee had this one hole.
+    """
+    async def fake_complete(msgs, **kw):
+        return "whatever the model said"
+
+    def exploding_parse(raw, *, max_msgs):
+        raise ValueError("regex blew up on model output")
+
+    monkeypatch.setattr(chat_engine, "_complete", fake_complete)
+    monkeypatch.setattr(chat_engine.burst, "parse", exploding_parse)
+    out = asyncio.run(chat_engine._generate(
+        "sys", "usr", model="m", temperature=0.9, max_tokens=100, max_msgs=3))
+    assert out == []

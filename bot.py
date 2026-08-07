@@ -1,8 +1,12 @@
-"""BrainrotGPT Telegram bot.
+"""BrainrotGPT: a Telegram bot that behaves like one specific teenager.
 
-Forward/paste a convo (or a screenshot), tweak the style, and get a short
-brainrot reply you can paste straight back (length is adjustable in /settings).
-Long polling by default; optional webhook mode. Persists settings to SQLite.
+This module is intake and wiring only — it turns Telegram updates into rows in
+`chat_state` and `messages`, and registers the jobs that act on them. It never
+replies synchronously in a DM: a message schedules a reply and the tick in
+scheduler.py delivers it, because a person who answers instantly every time
+isn't a person. Groups are the exception (§10) and reply inline when summoned.
+
+Long polling by default; optional webhook mode. All durable state is SQLite.
 """
 import asyncio
 import datetime
@@ -60,10 +64,6 @@ limiter = RateLimiter(
     global_per_min=config.RL_GLOBAL_PER_MIN,
 )
 
-TG_LIMIT = 4096          # Telegram max message length
-MSG_CAP = 3900           # leave room for footer + buttons in the controls message
-DEBOUNCE_S = 1.5         # wait after the last message before showing the confirm card
-
 def parse_mention(msg, bot_username: str | None, bot_id: int) -> tuple[bool, str]:
     """Return (was the bot @mentioned, the message text with that mention removed)."""
     text = msg.text or msg.caption or ""
@@ -88,22 +88,6 @@ def reply_to_bot(msg, bot_id: int) -> bool:
     """Was this message a reply to one of the bot's own messages?"""
     r = getattr(msg, "reply_to_message", None)
     return bool(r and getattr(r, "from_user", None) and r.from_user.id == bot_id)
-
-
-def split_text(text: str, limit: int = TG_LIMIT) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        cut = text.rfind(" ", 0, limit)
-        if cut <= 0:
-            cut = limit
-        chunks.append(text[:cut])
-        text = text[cut:].lstrip()
-    return chunks
 
 
 # --- Message intake --------------------------------------------------------

@@ -132,6 +132,10 @@ async def send(bot, chat_id: int, pieces: list[Piece], *, rng, sleeper,
         if not first:
             await sleeper(rng.uniform(0.5, 1.6))          # think gap
         reply_kw = {"reply_to_message_id": reply_to} if (first and reply_to) else {}
+        # Advance now, not after a successful send: a swallowed failure used to
+        # leave `first` True, so the next piece got the reply-quote again and
+        # skipped its think gap.
+        first = False
         try:
             if piece.kind == "sticker":
                 file_id = sticker_for(piece.value) if sticker_for else None
@@ -151,5 +155,4 @@ async def send(bot, chat_id: int, pieces: list[Piece], *, rng, sleeper,
         except Exception as e:  # noqa: BLE001 — one bad send shouldn't kill the burst
             logger.warning("burst send failed in chat %s: %s", chat_id, e)
             continue
-        first = False
     return delivered
