@@ -1,9 +1,14 @@
 """Simple in-memory rate limiter for a public bot.
 
-Protects the Groq quota with three guards:
-  - per-user cooldown between generations
+Stops one user hammering the bot, with three guards:
+  - per-user cooldown between messages
   - per-user cap per rolling 60s
   - global cap per rolling 60s
+
+Deliberately in-memory only: the limits reset on restart, and that is fine.
+The Groq quota is protected by budget.py, which caps proactive calls globally
+and persists across restarts — this class covers the per-user abuse case,
+which a restart does not carry over anyway.
 """
 import time
 from collections import defaultdict, deque
@@ -50,27 +55,3 @@ class RateLimiter:
         self._user_hits[user_id].append(now)
         self._global_hits.append(now)
 
-    def seed(self, events):
-        """Pre-populate windows from persisted (user_id, epoch) events.
-
-        Lets per-minute limits survive a restart instead of resetting to zero.
-        Wall-clock epochs are mapped into the monotonic-clock domain.
-        """
-        if not events:
-            return
-        now_wall = time.time()
-        now_mono = time.monotonic()
-        for user_id, ts in events:
-            mono = now_mono - (now_wall - ts)
-            self._user_hits[user_id].append(mono)
-            self._global_hits.append(mono)
-            last = self._last.get(user_id)
-            if last is None or mono > last:
-                self._last[user_id] = mono
-        for dq in self._user_hits.values():
-            dq_sorted = deque(sorted(dq))
-            dq.clear()
-            dq.extend(dq_sorted)
-        g = deque(sorted(self._global_hits))
-        self._global_hits.clear()
-        self._global_hits.extend(g)
