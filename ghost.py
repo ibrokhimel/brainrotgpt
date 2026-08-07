@@ -75,3 +75,22 @@ def schedule_reply_at(now: float, *, engaged: bool, bond: int, salty: bool, rng)
     """
     at = now + reply_delay(engaged=engaged, bond=bond, salty=salty, rng=rng)
     return defer_for_sleep(at, rng=rng)
+
+
+COLDOPEN_DAILY_CHANCE = 0.33
+COLDOPEN_CHANCE_BY_CHATTINESS = {"chill": 0.15, "normal": 0.33, "clingy": 0.6}
+
+
+def should_cold_open(state: dict, now: float, *, rng) -> bool:
+    """Roughly a one-in-three chance per eligible day, and never while asleep."""
+    if is_asleep(now):
+        return False
+    chance = COLDOPEN_CHANCE_BY_CHATTINESS.get(
+        state.get("chattiness") or "normal", COLDOPEN_DAILY_CHANCE)
+    # The tick runs every 60s, so scale the daily chance down to a per-tick one.
+    return rng.random() < chance / (24 * 60)
+
+
+def cold_open_at(now: float, *, rng) -> float:
+    """A plausible near-future moment to text first."""
+    return defer_for_sleep(now + rng.uniform(5 * 60, 4 * 3600), rng=rng)

@@ -448,3 +448,21 @@ def set_kid_state(key: str, value: str) -> None:
             (key, str(value)),
         )
         _db().commit()
+
+
+def coldopen_candidates(now: float, *, min_bond: int, active_within_s: float,
+                        quiet_for_s: float) -> list[dict]:
+    """Chats the kid could plausibly text first.
+
+    Evaluated in SQL rather than by waking a job per chat, so the tick cost stays
+    flat as the number of chats grows.
+    """
+    with _lock:
+        rows = _db().execute(
+            "SELECT * FROM chat_state WHERE muted=0 AND gave_up=0 "
+            "AND next_action_at IS NULL AND bond >= ? "
+            "AND last_user_ts IS NOT NULL AND last_user_ts >= ? "
+            "AND (last_kid_ts IS NULL OR last_kid_ts <= ?)",
+            (min_bond, now - active_within_s, now - quiet_for_s),
+        ).fetchall()
+    return [dict(r) for r in rows]
