@@ -33,49 +33,6 @@ def test_persona_label_random():
     assert "Sigma" in bot.persona_label_of("sigma")
 
 
-def test_keyboards_build():
-    # smoke: keyboards construct without error
-    assert bot.confirm_keyboard().inline_keyboard
-    assert bot.result_keyboard(3, 0, True).inline_keyboard
-    assert bot.persona_kb().inline_keyboard
-    assert bot.intensity_kb().inline_keyboard
-    assert bot.length_kb().inline_keyboard
-    assert bot.lang_kb().inline_keyboard
-    assert bot.cand_kb().inline_keyboard
-
-
-def _callbacks(kb):
-    return {b.callback_data for row in kb.inline_keyboard for b in row}
-
-
-def test_merge_button_only_with_prev():
-    assert "merge" not in _callbacks(bot.confirm_keyboard(has_prev=False))
-    assert "merge" in _callbacks(bot.confirm_keyboard(has_prev=True))
-
-
-def test_start_fresh_archives_after_generated():
-    session = {"buffer": [{"sender": None, "text": "old"}], "candidates": ["x"], "generated": True}
-    bot.start_fresh_if_done(session)
-    assert session["buffer"] == []
-    assert session["prev_buffer"] == [{"sender": None, "text": "old"}]
-    assert session["candidates"] == []
-    assert session["generated"] is False
-
-
-def test_start_fresh_noop_while_building():
-    session = {"buffer": [{"sender": None, "text": "a"}], "generated": False}
-    bot.start_fresh_if_done(session)
-    assert session["buffer"] == [{"sender": None, "text": "a"}]
-    assert "prev_buffer" not in session
-
-
-def test_confirm_message_flags_prev():
-    session = {"buffer": [{"sender": None, "text": "new"}], "prev_buffer": [{"sender": None, "text": "old"}]}
-    text, kb = bot.confirm_message(session)
-    assert "Merge" in text
-    assert "merge" in _callbacks(kb)
-
-
 # --- group mode helpers ---------------------------------------------------
 
 class _Ent:

@@ -1,4 +1,4 @@
-"""SQLite persistence: per-chat settings, favorites, analytics, subscriptions.
+"""SQLite persistence: per-chat settings, analytics, trends, and chat memory.
 
 Everything used to live in process memory and reset on restart. This module
 keeps the durable bits in a small SQLite file. Buffers being built mid-input
@@ -55,15 +55,6 @@ def init_db(path: str | None = None) -> None:
                 candidates INTEGER,
                 updated    REAL
             );
-            CREATE TABLE IF NOT EXISTS favorites (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER,
-                user_id INTEGER,
-                text    TEXT,
-                persona TEXT,
-                created REAL
-            );
-            CREATE INDEX IF NOT EXISTS idx_fav_chat ON favorites(chat_id, created);
             CREATE TABLE IF NOT EXISTS generations (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id  INTEGER,
@@ -77,18 +68,6 @@ def init_db(path: str | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_gen_created ON generations(created);
             CREATE INDEX IF NOT EXISTS idx_gen_persona ON generations(persona, created);
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                chat_id INTEGER PRIMARY KEY,
-                hour    INTEGER,
-                enabled INTEGER,
-                created REAL
-            );
-            CREATE TABLE IF NOT EXISTS last_results (
-                chat_id INTEGER PRIMARY KEY,
-                text    TEXT,
-                persona TEXT,
-                updated REAL
-            );
             CREATE TABLE IF NOT EXISTS trends (
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
                 term    TEXT UNIQUE COLLATE NOCASE,
@@ -141,6 +120,10 @@ def init_db(path: str | None = None) -> None:
             _conn.execute("ALTER TABLE trends ADD COLUMN blurb TEXT NOT NULL DEFAULT ''")
         if "kind" not in tcols:
             _conn.execute("ALTER TABLE trends ADD COLUMN kind TEXT NOT NULL DEFAULT 'term'")
+        # One-time cleanup: drop tables from the old generator surface so
+        # upgraded installs don't carry dead tables.
+        for dead in ("favorites", "subscriptions", "last_results"):
+            _conn.execute(f"DROP TABLE IF EXISTS {dead}")
         _conn.commit()
 
 
@@ -206,36 +189,6 @@ def set_setting(chat_id: int, key: str, value) -> dict:
     return current
 
 
-# --- Favorites ------------------------------------------------------------
-
-def add_favorite(chat_id: int, user_id: int, text: str, persona: str) -> int:
-    with _lock:
-        cur = _db().execute(
-            "INSERT INTO favorites (chat_id, user_id, text, persona, created) VALUES (?,?,?,?,?)",
-            (chat_id, user_id, text, persona, time.time()),
-        )
-        _db().commit()
-        return cur.lastrowid
-
-
-def list_favorites(chat_id: int, limit: int = 10) -> list[dict]:
-    with _lock:
-        rows = _db().execute(
-            "SELECT id, text, persona, created FROM favorites WHERE chat_id=? ORDER BY created DESC LIMIT ?",
-            (chat_id, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def delete_favorite(fav_id: int, chat_id: int) -> bool:
-    with _lock:
-        cur = _db().execute(
-            "DELETE FROM favorites WHERE id=? AND chat_id=?", (fav_id, chat_id)
-        )
-        _db().commit()
-        return cur.rowcount > 0
-
-
 # --- Analytics (generations) ---------------------------------------------
 
 def log_generation(
@@ -288,64 +241,7 @@ def stats() -> dict:
         regens = db.execute(
             "SELECT COUNT(*) AS n FROM generations WHERE is_regen=1"
         ).fetchone()["n"]
-        favs = db.execute("SELECT COUNT(*) AS n FROM favorites").fetchone()["n"]
-    return {"total": total, "users": users, "last_24h": day, "regens": regens, "favorites": favs}
-
-
-# --- Last result (for /last + regenerate persistence) ---------------------
-
-def set_last_result(chat_id: int, text: str, persona: str) -> None:
-    with _lock:
-        _db().execute(
-            """INSERT INTO last_results (chat_id, text, persona, updated) VALUES (?,?,?,?)
-               ON CONFLICT(chat_id) DO UPDATE SET
-                 text=excluded.text, persona=excluded.persona, updated=excluded.updated""",
-            (chat_id, text, persona, time.time()),
-        )
-        _db().commit()
-
-
-def get_last_result(chat_id: int) -> dict | None:
-    with _lock:
-        row = _db().execute(
-            "SELECT text, persona FROM last_results WHERE chat_id=?", (chat_id,)
-        ).fetchone()
-    return dict(row) if row else None
-
-
-# --- Daily subscriptions --------------------------------------------------
-
-def set_subscription(chat_id: int, hour: int, enabled: bool = True) -> None:
-    with _lock:
-        _db().execute(
-            """INSERT INTO subscriptions (chat_id, hour, enabled, created) VALUES (?,?,?,?)
-               ON CONFLICT(chat_id) DO UPDATE SET
-                 hour=excluded.hour, enabled=excluded.enabled""",
-            (chat_id, hour, int(enabled), time.time()),
-        )
-        _db().commit()
-
-
-def remove_subscription(chat_id: int) -> None:
-    with _lock:
-        _db().execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
-        _db().commit()
-
-
-def list_subscriptions() -> list[dict]:
-    with _lock:
-        rows = _db().execute(
-            "SELECT chat_id, hour FROM subscriptions WHERE enabled=1"
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def get_subscription(chat_id: int) -> dict | None:
-    with _lock:
-        row = _db().execute(
-            "SELECT chat_id, hour, enabled FROM subscriptions WHERE chat_id=?", (chat_id,)
-        ).fetchone()
-    return dict(row) if row else None
+    return {"total": total, "users": users, "last_24h": day, "regens": regens}
 
 
 # --- Trends (live brainrot vocab, manual + auto-fetched) ------------------

@@ -42,14 +42,6 @@ def test_bad_intensity_rejected():
         db.set_setting(1, "intensity", "nope")
 
 
-def test_favorites_roundtrip():
-    fid = db.add_favorite(1, 10, "banger reply", "doomer_prophet")
-    favs = db.list_favorites(1)
-    assert len(favs) == 1 and favs[0]["id"] == fid
-    assert db.delete_favorite(fid, 1) is True
-    assert db.list_favorites(1) == []
-
-
 def test_analytics_and_leaderboard():
     db.log_generation(1, 10, "gym_sigma", "medium", "default", False, 100)
     db.log_generation(1, 10, "gym_sigma", "medium", "default", True, 50)
@@ -58,19 +50,6 @@ def test_analytics_and_leaderboard():
     assert lb[0]["persona"] == "gym_sigma" and lb[0]["n"] == 2
     s = db.stats()
     assert s["total"] == 3 and s["regens"] == 1 and s["users"] == 2
-
-
-def test_last_result_roundtrip():
-    db.set_last_result(1, "the reply", "conspiracy")
-    last = db.get_last_result(1)
-    assert last["text"] == "the reply" and last["persona"] == "conspiracy"
-
-
-def test_subscriptions():
-    db.set_subscription(1, 9, True)
-    assert any(s["chat_id"] == 1 for s in db.list_subscriptions())
-    db.remove_subscription(1)
-    assert db.list_subscriptions() == []
 
 
 # --- trends ---------------------------------------------------------------
