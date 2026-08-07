@@ -1,6 +1,9 @@
 import asyncio
 import random
 
+import pytest
+from telegram.error import Forbidden
+
 import burst
 
 
@@ -104,3 +107,17 @@ def test_send_survives_a_failing_send():
     sent = _run(burst.send(bot, 1, [burst.Piece("text", "yo")],
                            rng=random.Random(0), sleeper=sleep))
     assert sent == []
+
+
+def test_send_propagates_forbidden_so_the_caller_can_mute():
+    """Unlike an ordinary send failure, a blocked-bot signal must not be
+    swallowed — the caller (scheduler.tick) relies on it to mute the chat
+    permanently instead of retrying forever."""
+    class Blocked(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            raise Forbidden("bot was blocked by the user")
+
+    bot, (sleep, _) = Blocked(), _sleeper()
+    with pytest.raises(Forbidden):
+        _run(burst.send(bot, 1, [burst.Piece("text", "yo")],
+                        rng=random.Random(0), sleeper=sleep))
