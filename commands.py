@@ -20,15 +20,11 @@ import guard
 import trends
 
 WELCOME = (
-    "yo welcome to BrainrotGPT 🗿📈\n\n"
-    "forward me a convo, paste it, or send a screenshot 📸 and i'll cook you a "
-    "single unhinged brainrot reply you can paste straight back 😭🙏\n\n"
-    "how it works:\n"
-    "1️⃣ forward/paste the messages (or a screenshot)\n"
-    "2️⃣ i show what i caught + a ✅ Generate button\n"
-    "3️⃣ tap Generate → receive maximum aura 📈🗿\n\n"
-    "🎭 /settings — style, length, intensity, tone, language, best-of-N\n"
-    "commands: /done · /clear · /settings · /saved · /last · /leaderboard · /daily · /help"
+    "yo 🗿 i'm jayden\n\n"
+    "just text me like you would anyone else, i'll hit you back "
+    "(might take me a sec, i'm not just sitting here)\n\n"
+    "/settings — mood · chattiness · mute\n"
+    "/help for more"
 )
 
 # Commands shown in Telegram's "/" menu (set via set_my_commands on startup).
@@ -42,14 +38,17 @@ BOT_COMMANDS = [
 ]
 
 HELP = (
-    "BrainrotGPT 🗿\n\n"
-    "• forward/paste messages OR send a screenshot — i'll buffer them\n\n"
-    "🎭 /settings — style / length / intensity / tone / language / best-of-N\n"
-    "/persona — quick style picker\n"
-    "in groups: add me + @mention me and i'll cook off the recent chat. turn my "
-    "privacy mode OFF in BotFather so i can read messages 👀\n"
-    "inline (any chat): @yourbot <paste the text> — inline can only see what you type\n\n"
-    "commands: /clear · /help"
+    "jayden 🗿\n\n"
+    "just text me normally, no special format needed. i reply in a few "
+    "separate messages usually, not one big paragraph — might take a sec\n\n"
+    "leave me on read too long and don't be shocked if i hit you up again 👀\n\n"
+    "send a screenshot and i'll react to it\n\n"
+    "in groups: @ mention me (and turn my privacy mode OFF in BotFather so "
+    "i can actually see the chat)\n\n"
+    "i sleep like 1am-9am so don't expect much then 😴\n\n"
+    "/settings — mood · chattiness · mute\n"
+    "/shutup — make me stop texting you\n"
+    "/yo — bring me back"
 )
 
 _rng = random.Random()
