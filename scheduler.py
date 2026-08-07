@@ -48,10 +48,18 @@ def pings_remaining(state: dict, today: str) -> int:
     return max(0, config.MAX_PINGS_PER_DAY - int(state.get("pings_today") or 0))
 
 
-async def deliver(bot_obj, chat_id: int, pieces, state: dict, reply_to: int | None = None) -> None:
-    """Send a burst and record what was said. Silent on total failure."""
+async def deliver(bot_obj, chat_id: int, pieces, state: dict,
+                  reply_to: int | None = None) -> bool:
+    """Send a burst and record what was said. Returns True if anything landed.
+
+    `Forbidden` is handled here rather than at each call site. This function has
+    two callers holding the same contract — the tick and bot.on_group_message —
+    and the right response to being blocked is identical for both: mute
+    permanently and cancel all scheduling. Keeping it here means a third caller
+    can't forget it, which is exactly how the group path ended up without it.
+    """
     if not pieces:
-        return
+        return False
     pieces = burst.apply_typos(pieces, rng=_rng)
     if stickers.enabled() and _rng.random() < config.STICKER_RANDOM_CHANCE:
         pieces = list(pieces) + [burst.Piece("sticker", _rng.choice(stickers.available_emoji()))]
@@ -59,12 +67,23 @@ async def deliver(bot_obj, chat_id: int, pieces, state: dict, reply_to: int | No
     def sticker_for(emoji: str):
         return stickers.pick(chat_id, emoji, rng=_rng) or stickers.pick_random(chat_id, rng=_rng)
 
-    sent = await burst.send(bot_obj, chat_id, pieces, rng=_rng, sleeper=asyncio.sleep,
-                            sticker_for=sticker_for, reply_to=reply_to)
+    try:
+        sent = await burst.send(bot_obj, chat_id, pieces, rng=_rng, sleeper=asyncio.sleep,
+                                sticker_for=sticker_for, reply_to=reply_to)
+    except Forbidden:
+        logger.info("chat %s blocked the bot — muting permanently", chat_id)
+        db.update_chat_state(chat_id, muted=1, next_action_at=None, next_action_kind=None)
+        return False
     for text in sent:
         db.add_message(chat_id, "kid", text)
-    if sent or pieces:
+    # Only `sent` — not `pieces`, which is guaranteed non-empty by the early
+    # return above. Recording that the kid spoke when every send failed burns
+    # the one wounded reply a returning user earned, and advances last_kid_ts
+    # from a message that does not exist — which the ghost ladder and the
+    # cold-open quiet window are both measured from.
+    if sent:
         db.update_chat_state(chat_id, last_kid_ts=time.time(), salty=0)
+    return bool(sent)
 
 
 async def tick(context: ContextTypes.DEFAULT_TYPE):
@@ -99,7 +118,8 @@ async def _do_reply(bot_obj, chat_id: int, state: dict, now: float):
         mood = _rng.choice(brainrot.PERSONAS)[0]
         state = db.update_chat_state(chat_id, mood=mood, mood_set_at=now)
     pieces = await chat_engine.reply(chat_id, state, rng=_rng)
-    await deliver(bot_obj, chat_id, pieces, state)
+    if not await deliver(bot_obj, chat_id, pieces, state):
+        return          # nothing reached them — chasing an unreceived message is absurd
     if config.GHOST_ENABLED:
         fire_at, stage = ghost.next_ping(0, time.time(), rng=_rng,
                                          chattiness=state["chattiness"])
