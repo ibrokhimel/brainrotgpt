@@ -126,3 +126,86 @@ def test_do_reply_arms_no_ghost_ping_when_nothing_was_delivered(tmp_path, monkey
 
     state = db.get_chat_state(1)
     assert state["next_action_kind"] != "ping"
+
+
+# --- I3: spec 12's "retry once on the next tick" ----------------------------
+
+class _Ctx:
+    def __init__(self, bot):
+        self.bot = bot
+
+
+def test_a_failed_reply_is_retried_on_the_next_tick(tmp_path, monkeypatch):
+    """tick clears next_action_at before acting -- correctly, so a mid-action
+    failure can't re-fire every tick forever -- but nothing ever rescheduled.
+    A single Groq 5xx or rate-limit during a reply job meant the user's message
+    was answered NEVER, with no log they could see and no state remembering a
+    reply was owed. On a shared free-tier key with backup keys chained for
+    exactly this reason, transient failure is the expected case.
+    """
+    _fresh(tmp_path)
+    db.update_chat_state(1, next_action_at=100.0, next_action_kind="reply")
+
+    async def boom(chat_id, state, *, rng):
+        raise RuntimeError("groq 503")
+
+    monkeypatch.setattr(scheduler.chat_engine, "reply", boom)
+    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
+    _run(scheduler.tick(_Ctx(_Bot())))
+
+    state = db.get_chat_state(1)
+    assert state["next_action_at"] is not None, "the reply was dropped, not retried"
+    assert state["next_action_kind"] == "reply:retry"
+
+
+def test_a_second_failure_drops_the_reply_silently(tmp_path, monkeypatch):
+    """Spec 12: retry ONCE, then drop it silently. Not an infinite loop."""
+    _fresh(tmp_path)
+    db.update_chat_state(1, next_action_at=100.0, next_action_kind="reply:retry")
+
+    async def boom(chat_id, state, *, rng):
+        raise RuntimeError("groq 503 again")
+
+    monkeypatch.setattr(scheduler.chat_engine, "reply", boom)
+    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
+    _run(scheduler.tick(_Ctx(_Bot())))
+
+    state = db.get_chat_state(1)
+    assert state["next_action_at"] is None
+    assert state["next_action_kind"] is None
+
+
+def test_a_retry_that_succeeds_behaves_like_an_ordinary_reply(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    db.update_chat_state(1, next_action_at=100.0, next_action_kind="reply:retry")
+
+    async def fake_reply(chat_id, state, *, rng):
+        return [burst.Piece("text", "sorry phone died")]
+
+    monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
+    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
+    bot = _Bot()
+    _run(scheduler.tick(_Ctx(bot)))
+
+    assert bot.sent == ["sorry phone died"]
+    assert db.get_chat_state(1)["next_action_kind"] == "ping"   # the ladder arms normally
+
+
+def test_a_failed_ping_is_not_retried(tmp_path, monkeypatch):
+    """Only replies are owed to a person. A missed proactive ping is just a
+    ping that didn't happen -- retrying it would spend budget chasing someone
+    on the kid's behalf, not answering them."""
+    _fresh(tmp_path)
+    db.update_chat_state(1, next_action_at=100.0, next_action_kind="ping", ping_stage=1)
+
+    async def boom(chat_id, state, stage, *, rng):
+        raise RuntimeError("groq 503")
+
+    monkeypatch.setattr(scheduler.chat_engine, "ping", boom)
+    monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
+    _run(scheduler.tick(_Ctx(_Bot())))
+
+    assert db.get_chat_state(1)["next_action_at"] is None

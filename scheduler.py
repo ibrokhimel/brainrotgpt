@@ -39,6 +39,12 @@ _rng = random.Random()
 BOND_GHOST_STAGE = -10   # bond hit for every unanswered ping
 BOND_GAVE_UP = -25       # bond hit when the ladder is exhausted and the kid gives up
 
+# Spec §12: a Groq failure during a reply job is retried once on the next tick,
+# then dropped silently. The retry is encoded in next_action_kind rather than a
+# new column so it survives a restart like every other scheduling decision.
+RETRY_KIND = "reply:retry"
+RETRY_DELAY_S = 60
+
 
 def pings_remaining(state: dict, today: str) -> int:
     if state.get("pings_day") != today:
@@ -95,7 +101,7 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
         # forever re-firing the same due action every tick.
         db.update_chat_state(chat_id, next_action_at=None, next_action_kind=None)
         try:
-            if kind == "reply":
+            if kind in ("reply", RETRY_KIND):
                 await _do_reply(context.bot, chat_id, state, now)
             elif kind == "ping":
                 await _do_ping(context.bot, chat_id, state, now, today)
@@ -106,6 +112,14 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
             db.update_chat_state(chat_id, muted=1, next_action_at=None)
         except Exception as e:  # noqa: BLE001 — one bad chat must not stall the tick
             logger.warning("tick failed for chat %s: %s", chat_id, e)
+            # A reply is owed to a person, so it gets one retry (spec §12) —
+            # on a shared free-tier key a transient 5xx is the expected case,
+            # not the exotic one, and dropping it answers them never. A missed
+            # ping or cold open is just one the kid didn't send; retrying those
+            # would spend budget chasing rather than answering.
+            if kind == "reply":
+                db.update_chat_state(chat_id, next_action_at=time.time() + RETRY_DELAY_S,
+                                     next_action_kind=RETRY_KIND)
 
     if config.COLDOPEN_ENABLED:
         await _maybe_schedule_cold_opens(now)
