@@ -106,6 +106,8 @@ BOT_COMMANDS = [
     BotCommand("settings", "style · length · intensity · tone · language 🎭"),
     BotCommand("persona", "quick style picker 🎭"),
     BotCommand("clear", "wipe the current convo 🗑"),
+    BotCommand("shutup", "mute the kid 🤐"),
+    BotCommand("yo", "unmute the kid 🗿"),
     BotCommand("help", "how this thing works ❓"),
 ]
 
@@ -331,6 +333,18 @@ async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎭 pick a style:", reply_markup=persona_kb())
 
 
+async def cmd_shutup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    db.update_chat_state(chat_id, muted=1, next_action_at=None, next_action_kind=None)
+    await update.message.reply_text("aight bet 🤐")
+
+
+async def cmd_yo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    db.update_chat_state(chat_id, muted=0, gave_up=0, ping_stage=0)
+    await update.message.reply_text("im back 🗿")
+
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not guard.is_owner(update.effective_user.id):
         await update.message.reply_text("owner only 🔒")
@@ -417,6 +431,7 @@ BOND_PER_MESSAGE = 1
 BOND_LONG_MESSAGE = 3
 LONG_MESSAGE_CHARS = 200
 LOW_CONTENT = {"lol", "ok", "okay", "k", "lmao", "yeah", "yea", "no", "nah", "haha", "true"}
+REACTION_CHANCE = 0.35  # a low-content message sometimes just earns an emoji, not a reply
 
 _rng = random.Random()
 
@@ -458,6 +473,17 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.add_message(chat_id, "user", text)
     limiter.record(user_id)
+
+    # A low-content message sometimes earns just a reaction — and crucially arms
+    # no ghost ping, because there is nothing to chase.
+    if is_low_content(text) and _rng.random() < REACTION_CHANCE:
+        try:
+            await msg.set_reaction(_rng.choice(["💀", "🔥", "👀", "😭", "🗿"]))
+        except Exception as e:  # noqa: BLE001 — reactions are cosmetic
+            logger.debug("reaction failed: %s", e)
+        else:
+            db.update_chat_state(chat_id, last_user_ts=now, bond=apply_bond(state, text))
+            return
 
     engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < 120)
     salty = bool(state["gave_up"])          # they're back after being given up on
@@ -732,6 +758,8 @@ def main():
     app.add_handler(CommandHandler(["clear", "cancel"], cmd_clear))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("persona", cmd_persona))
+    app.add_handler(CommandHandler("shutup", cmd_shutup))
+    app.add_handler(CommandHandler("yo", cmd_yo))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("trend", cmd_trend))
     app.add_handler(CallbackQueryHandler(on_button))
