@@ -3060,12 +3060,49 @@ git add bot.py tests/test_bot_kid.py
 git commit -m "feat(bot): wire the kid — intake, tick scheduler, burst delivery"
 ```
 
-**If `bot.py` is over 500 lines:** move `tick`, `_do_reply`, `_do_ping`,
-`_do_cold_open`, `_maybe_schedule_cold_opens`, `life_refresh_job`,
-`sticker_reload_job` and `trend_refresh_job` into a new `scheduler.py`, importing
-`deliver` from `bot`. Register it in `main()` as
-`app.job_queue.run_repeating(scheduler.tick, interval=60, first=10, name="tick")`.
-Do this as a separate commit so the move is reviewable on its own.
+**The `scheduler.py` split is MANDATORY, not conditional.** This plan originally
+estimated `bot.py` at ~450 lines after Task 13's deletions. Measured reality: **717**.
+Adding this task's ~200 lines would reach ~900 against a hard 500-line cap.
+
+Create `scheduler.py` — everything the kid does on its own schedule, plus the
+delivery primitive those paths share:
+
+- `deliver(bot_obj, chat_id, pieces, state, reply_to=None)`
+- `tick(context)` — the 60-second scheduler
+- `_do_reply`, `_do_ping`, `_do_cold_open`, `_maybe_schedule_cold_opens`
+- the daily jobs: `life_refresh_job`, `sticker_reload_job`, `trend_refresh_job`
+- `cleanup_sessions` (now also pruning `messages`)
+- the module-level `_rng = random.Random()` these share
+
+`bot.py` keeps Telegram plumbing only: handlers, keyboards, `on_startup` /
+`on_shutdown`, `on_error`, `acquire_single_instance_lock`, `main()`, and the
+bond/intake helpers.
+
+**Import direction is load-bearing.** `bot.py` imports `scheduler`; `scheduler.py`
+must NEVER import `bot`. That is precisely why `deliver` lives in `scheduler.py` —
+the ghost and cold-open paths need it, and Task 15's group handler calls
+`scheduler.deliver(...)` from `bot.py`. Putting `deliver` in `bot.py` forces the
+reverse import and creates a cycle that fails at **startup**, not in tests: every
+test would pass right up until the bot refuses to boot.
+
+Register the tick as:
+
+```python
+app.job_queue.run_repeating(scheduler.tick, interval=60, first=10, name="tick")
+```
+
+### Rate limiting — a gap this plan originally missed
+
+Task 13 removes the last rate-limit call sites on the message-intake path (they
+lived in the deleted `cook()` route). `on_inline` still calls `limiter.check` /
+`limiter.record`, so `rate_limit.py` is not orphaned — but the new DM intake path
+would have no rate limiting at all, contradicting §12 of the spec ("rate limiting
+stays, now about protecting the Groq quota").
+
+Add a `limiter.check(user_id)` / `limiter.record(user_id)` gate in
+`on_user_message` before scheduling a reply. On refusal, **return silently** — do
+not send the limiter's refusal text. A person who is being rate-limited simply
+doesn't answer; a bot explains itself, and explaining itself breaks the illusion.
 
 ---
 
