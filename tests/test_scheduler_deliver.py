@@ -209,3 +209,47 @@ def test_a_failed_ping_is_not_retried(tmp_path, monkeypatch):
     _run(scheduler.tick(_Ctx(_Bot())))
 
     assert db.get_chat_state(1)["next_action_at"] is None
+
+
+def test_a_delivery_failure_is_retried_like_a_generation_failure(tmp_path, monkeypatch):
+    """The retry only triggered on an exception -- but burst.send swallows
+    every non-Forbidden error, so a Telegram 5xx never reaches tick's handler.
+    Groq succeeds, the send fails, and the reply is lost permanently, while the
+    same failure one layer up would have been retried. A retry that cannot see
+    the most likely failure mode isn't a retry.
+    """
+    _fresh(tmp_path)
+    db.update_chat_state(1, next_action_at=100.0, next_action_kind="reply")
+
+    async def fake_reply(chat_id, state, *, rng):
+        return [burst.Piece("text", "yo")]
+
+    monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
+    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
+    _run(scheduler.tick(_Ctx(_Bot(fail_with=RuntimeError("telegram 503")))))
+
+    state = db.get_chat_state(1)
+    assert state["next_action_at"] is not None, "the reply was dropped, not retried"
+    assert state["next_action_kind"] == scheduler.RETRY_KIND
+
+
+def test_a_blocked_chat_is_not_retried(tmp_path, monkeypatch):
+    """deliver mutes on Forbidden and returns False. That False must not be
+    read as "transient" -- re-arming would leave next_action_at non-NULL on a
+    chat the tick can never see, which is the C3 deadlock shape."""
+    _fresh(tmp_path)
+    db.update_chat_state(1, next_action_at=100.0, next_action_kind="reply")
+
+    async def fake_reply(chat_id, state, *, rng):
+        return [burst.Piece("text", "yo")]
+
+    monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
+    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
+    _run(scheduler.tick(_Ctx(_Bot(fail_with=Forbidden("blocked")))))
+
+    state = db.get_chat_state(1)
+    assert state["muted"] == 1
+    assert state["next_action_at"] is None
+    assert state["next_action_kind"] is None

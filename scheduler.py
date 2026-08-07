@@ -100,9 +100,10 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
         # Clear the schedule before acting so a failure below can never loop
         # forever re-firing the same due action every tick.
         db.update_chat_state(chat_id, next_action_at=None, next_action_kind=None)
+        done = True
         try:
             if kind in ("reply", RETRY_KIND):
-                await _do_reply(context.bot, chat_id, state, now)
+                done = await _do_reply(context.bot, chat_id, state, now)
             elif kind == "ping":
                 await _do_ping(context.bot, chat_id, state, now, today)
             elif kind == "coldopen":
@@ -110,28 +111,39 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
         except Forbidden:
             logger.info("chat %s blocked the bot — muting permanently", chat_id)
             db.update_chat_state(chat_id, muted=1, next_action_at=None, next_action_kind=None)
+            continue
         except Exception as e:  # noqa: BLE001 — one bad chat must not stall the tick
             logger.warning("tick failed for chat %s: %s", chat_id, e)
-            # A reply is owed to a person, so it gets one retry (spec §12) —
-            # on a shared free-tier key a transient 5xx is the expected case,
-            # not the exotic one, and dropping it answers them never. A missed
-            # ping or cold open is just one the kid didn't send; retrying those
-            # would spend budget chasing rather than answering.
-            if kind == "reply":
-                db.update_chat_state(chat_id, next_action_at=time.time() + RETRY_DELAY_S,
-                                     next_action_kind=RETRY_KIND)
+            done = False
+        # A reply is owed to a person, so it gets one retry (spec §12) — on a
+        # shared free-tier key a transient 5xx is the expected case, not the
+        # exotic one, and dropping it answers them never. A missed ping or cold
+        # open is just one the kid didn't send; retrying those would spend
+        # budget chasing rather than answering.
+        #
+        # `done` covers a failed *delivery* as well as a raised exception:
+        # burst.send swallows every non-Forbidden error, so a Telegram 5xx
+        # never reaches the handler above and the retry would otherwise be
+        # blind to the most likely way a reply gets lost. The muted check keeps
+        # a chat that just blocked us out of it — re-arming there would leave
+        # next_action_at set on a row the tick can never see again.
+        if not done and kind == "reply" and not db.get_chat_state(chat_id)["muted"]:
+            db.update_chat_state(chat_id, next_action_at=time.time() + RETRY_DELAY_S,
+                                 next_action_kind=RETRY_KIND)
 
     if config.COLDOPEN_ENABLED:
         await _maybe_schedule_cold_opens(now)
 
 
-async def _do_reply(bot_obj, chat_id: int, state: dict, now: float):
+async def _do_reply(bot_obj, chat_id: int, state: dict, now: float) -> bool:
+    """Answer a due reply. Returns False if nothing reached them, so the tick
+    can re-arm the one retry spec §12 asks for."""
     if chat_engine.should_reroll_mood(state, now, rng=_rng):
         mood = _rng.choice(brainrot.PERSONAS)[0]
         state = db.update_chat_state(chat_id, mood=mood, mood_set_at=now)
     pieces = await chat_engine.reply(chat_id, state, rng=_rng)
     if not await deliver(bot_obj, chat_id, pieces, state):
-        return          # nothing reached them — chasing an unreceived message is absurd
+        return False    # nothing reached them — chasing an unreceived message is absurd
     if config.GHOST_ENABLED:
         fire_at, stage = ghost.next_ping(0, time.time(), rng=_rng,
                                          chattiness=state["chattiness"])
@@ -141,6 +153,7 @@ async def _do_reply(bot_obj, chat_id: int, state: dict, now: float):
     state = db.get_chat_state(chat_id)
     if memory.should_distill(state):
         await memory.distill(chat_id, state)
+    return True
 
 
 async def _do_ping(bot_obj, chat_id: int, state: dict, now: float, today: str):
