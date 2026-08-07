@@ -50,14 +50,22 @@ def test_prompt_lists_sticker_emoji_only_when_a_pack_is_loaded():
 
 
 def test_no_trailing_periods_normally():
-    p = _prompt()
-    assert "never end a message with a period" in p.lower()
+    p = _prompt().lower()
+    assert "never end a message with a period" in p
+    assert "end your messages with periods" not in p
 
 
 def test_salty_flips_the_period_rule_and_adds_the_wounded_line():
-    p = _prompt(state={"salty": 1})
-    assert "ghosted" in p.lower()
-    assert "use periods" in p.lower()
+    p = _prompt(state={"salty": 1}).lower()
+    assert "ghosted" in p
+    assert "end your messages with periods" in p
+    assert "never end a message with a period" not in p
+
+
+def test_low_bond_also_flips_the_period_rule():
+    p = _prompt(state={"bond": -50}).lower()
+    assert "end your messages with periods" in p
+    assert "never end a message with a period" not in p
 
 
 def test_bond_line_changes_across_buckets():

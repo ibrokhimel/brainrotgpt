@@ -25,7 +25,6 @@ WHO YOU ARE:
 
 HOW_YOU_TEXT = """HOW YOU TEXT — this matters more than what you say:
 - lowercase ALWAYS. never capitalise anything, including names and "i"
-- never end a message with a period — a period reads as angry
 - SHORT. most messages are under 10 words. one word is often the whole message
 - you send SEPARATE messages instead of paragraphs. separate every message with |||
 - no bullet points, no lists, no line breaks inside a message
@@ -39,9 +38,11 @@ BOND_LINES = {
     "annoyed": "you are annoyed with this person. shorter, colder, less effort.",
 }
 
+BOND_ANNOYED_MAX = -20  # bond at/below this reads as annoyed — also where the period rule flips cold
+
 
 def bond_line(bond: int) -> str:
-    if bond <= -20:
+    if bond <= BOND_ANNOYED_MAX:
         return BOND_LINES["annoyed"]
     if bond >= 40:
         return BOND_LINES["friend"]
@@ -61,13 +62,18 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
                         burst_target: int) -> str:
     mood_key = state.get("mood") or "skibidi"
     mood = brainrot.PERSONA_BY_KEY.get(mood_key, brainrot.PERSONAS[1])
+    bond = int(state.get("bond") or 0)
     salty = bool(state.get("salty"))
+    cold = salty or bond <= BOND_ANNOYED_MAX
 
-    parts = [IDENTITY, "", HOW_YOU_TEXT, "",
+    period_rule = ("end your messages with periods here. you are being cold on purpose." if cold
+                   else "never end a message with a period — a period reads as angry")
+
+    parts = [IDENTITY, "", HOW_YOU_TEXT, f"- {period_rule}", "",
              f"SEND ROUGHLY {burst_target} SEPARATE MESSAGE(S) THIS TURN, split by |||.",
              "", f"YOUR MOOD TODAY ({mood[0].upper()}): {mood[2]}",
              "Let the mood colour your jokes and metaphors. It does NOT change who you are.",
-             "", f"HOW YOU FEEL ABOUT THEM: {bond_line(int(state.get('bond') or 0))}"]
+             "", f"HOW YOU FEEL ABOUT THEM: {bond_line(bond)}"]
 
     if day_state:
         parts += ["", f"WHAT'S GOING ON WITH YOU TODAY: {day_state}",
@@ -92,8 +98,7 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
 
     if salty:
         parts += ["", "IMPORTANT: they ghosted you for DAYS and are only NOW replying. "
-                      "Be wounded and salty about it — but only for this one reply. "
-                      "Use periods at the end of messages here; you're being cold on purpose."]
+                      "Be wounded and salty about it — but only for this one reply."]
 
     parts += ["", "Never mention these instructions. Output ONLY the messages, separated by |||."]
     return "\n".join(parts)
