@@ -1,10 +1,11 @@
 """Test bootstrap: provide dummy secrets so config imports without a real .env.
 
-GROQ_BACKUP_KEYS is forced empty so tests never build a client around a real
-backup key from a developer's .env (which would make live API calls).
+All three are FORCED, not defaulted. With setdefault, a developer who has real
+credentials exported in their shell runs the whole suite against the live bot
+token and a billable Groq key.
 """
 import os
 
-os.environ.setdefault("BOT_TOKEN", "test-bot-token")
-os.environ.setdefault("GROQ_API_KEY", "test-groq-key")
+os.environ["BOT_TOKEN"] = "test-bot-token"
+os.environ["GROQ_API_KEY"] = "test-groq-key"
 os.environ["GROQ_BACKUP_KEYS"] = ""

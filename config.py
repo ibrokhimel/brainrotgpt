@@ -83,9 +83,14 @@ MAX_TRANSCRIPT_CHARS = _int("MAX_TRANSCRIPT_CHARS", 6000)  # token-budget guard
 TREND_FETCH_ENABLED = _flag("TREND_FETCH_ENABLED", True)
 TREND_SUBREDDITS = [
     s.strip() for s in os.getenv(
-        "TREND_SUBREDDITS", "brainrot,GenZ,teenagers,tiktokcringe"
+        "TREND_SUBREDDITS",
+        # r/OutOfTheLoop is the highest-signal free source there is — people ask
+        # "what does X mean" exactly as a meme peaks. r/InstagramReels reaches
+        # Instagram content through Reddit's public JSON instead of IG's wall.
+        "OutOfTheLoop,brainrot,memes,dankmemes,GenZ,teenagers,tiktokcringe,InstagramReels",
     ).split(",") if s.strip()
 ]
+KYM_FETCH_ENABLED = _flag("KYM_FETCH_ENABLED", True)
 TREND_FETCH_HOUR = _int("TREND_FETCH_HOUR", 5)  # daily auto-fetch hour (server local)
 TREND_MAX_ADD = _int("TREND_MAX_ADD", 25)  # cap terms stored per auto refresh
 
@@ -117,3 +122,27 @@ SINGLE_INSTANCE_LOCK = _flag("SINGLE_INSTANCE_LOCK", True)
 
 # --- Daily brainrot -------------------------------------------------------
 DAILY_DEFAULT_HOUR = _int("DAILY_DEFAULT_HOUR", 9)  # local server hour for /daily
+
+# --- Outbound budget (protects the Groq quota) ----------------------------
+# Ghost pings, cold opens, notes distillation and the daily life state are LLM
+# calls nobody asked for, and they scale with chat count. This caps them per day.
+# Replies to real users are NEVER budgeted. 0 = unlimited.
+OUTBOUND_DAILY_BUDGET = _int("OUTBOUND_DAILY_BUDGET", 300)
+
+# --- The kid's day --------------------------------------------------------
+SCHOOL_START_HOUR = _int("SCHOOL_START_HOUR", 8)
+SCHOOL_END_HOUR = _int("SCHOOL_END_HOUR", 15)
+LIFE_REFRESH_HOUR = _int("LIFE_REFRESH_HOUR", 6)  # when the daily life state regenerates
+
+# --- Stickers -------------------------------------------------------------
+# The short name of a Telegram sticker pack (the bit after t.me/addstickers/).
+# Empty = stickers disabled. The pack is re-read daily, so adding stickers in
+# Telegram makes them available to the kid without a redeploy.
+STICKER_PACK_NAME = os.getenv("STICKER_PACK_NAME", "").strip()
+STICKER_RANDOM_CHANCE = _float("STICKER_RANDOM_CHANCE", 0.07)
+
+# --- Proactive behaviour --------------------------------------------------
+GHOST_ENABLED = _flag("GHOST_ENABLED", True)
+COLDOPEN_ENABLED = _flag("COLDOPEN_ENABLED", True)
+COLDOPEN_MIN_BOND = _int("COLDOPEN_MIN_BOND", 10)
+MAX_PINGS_PER_DAY = _int("MAX_PINGS_PER_DAY", 3)

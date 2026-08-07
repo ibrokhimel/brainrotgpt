@@ -1,27 +1,26 @@
-"""BrainrotGPT Telegram bot.
+"""BrainrotGPT: a Telegram bot that behaves like one specific teenager.
 
-Forward/paste a convo (or a screenshot), tweak the style, and get a short
-brainrot reply you can paste straight back (length is adjustable in /settings).
-Long polling by default; optional webhook mode. Persists settings to SQLite.
+This module is intake and wiring only — it turns Telegram updates into rows in
+`chat_state` and `messages`, and registers the jobs that act on them. It never
+replies synchronously in a DM: a message schedules a reply and the tick in
+scheduler.py delivers it, because a person who answers instantly every time
+isn't a person. Groups are the exception (§10) and reply inline when summoned.
+
+Long polling by default; optional webhook mode. All durable state is SQLite.
 """
 import asyncio
 import datetime
 import hashlib
-import io
 import logging
+import random
 import socket
 import time
-from collections import deque
 
 from telegram import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     InlineQueryResultArticle,
     InputTextMessageContent,
     Update,
 )
-from telegram.constants import ChatAction
 from telegram.error import Conflict
 from telegram.ext import (
     Application,
@@ -34,15 +33,20 @@ from telegram.ext import (
 )
 
 import brainrot
+import chat_engine
+import commands
 import config
 import db
+import ghost
 import guard
 import health
-import share_card
-import trends
+import life
+import scheduler
+import stickers
 import vision
-from brainrot import PERSONA_BY_KEY, PERSONAS, BrainrotError, BrainrotResult
+from commands import cmd_shutup, cmd_yo, settings_kb, settings_text  # noqa: F401 — re-exported
 from rate_limit import RateLimiter
+from scheduler import BOND_GAVE_UP, BOND_GHOST_STAGE, pings_remaining  # noqa: F401 — re-exported
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -54,99 +58,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("brainrotgpt")
 
-# In-memory per-chat state (transient input staging + last candidates).
-# chat_id -> {"buffer": [...], "candidates": [...], "cand_idx": int, "ts": float}
-sessions: dict[int, dict] = {}
-
 limiter = RateLimiter(
     cooldown_s=config.RL_COOLDOWN_S,
     per_user_per_min=config.RL_PER_USER_PER_MIN,
     global_per_min=config.RL_GLOBAL_PER_MIN,
 )
-
-TG_LIMIT = 4096          # Telegram max message length
-MSG_CAP = 3900           # leave room for footer + buttons in the controls message
-DEBOUNCE_S = 1.5         # wait after the last message before showing the confirm card
-SESSION_TTL_S = 1800     # evict idle buffers after 30 min
-
-INTENSITY_LABELS = {"mild": "🌶 Mild", "medium": "🔥 Medium", "unhinged": "☢️ Unhinged"}
-LENGTH_LABELS = {"short": "💬 Short", "medium": "📄 Medium", "long": "📜 Long", "max": "🧱 Max"}
-TONE_LABELS = {
-    "default": "😐 Default", "roast": "🔥 Roast", "cope": "😤 Cope",
-    "hype": "🚀 Hype", "deny": "🙅 Deny", "gaslight": "🌀 Gaslight",
-}
-# Languages ordered by Telegram's biggest user bases (Uzbek/English/Russian
-# pinned up front), then ranked by country: India, Indonesia, Brazil, Iran,
-# Egypt/Gulf, LatAm, Ukraine, Turkey.
-LANGS = [
-    ("auto", "🌐 Auto"), ("Uzbek", "🇺🇿 Uzbek"), ("English", "🇬🇧 English"),
-    ("Russian", "🇷🇺 Russian"), ("Hindi", "🇮🇳 Hindi"), ("Indonesian", "🇮🇩 Indonesian"),
-    ("Portuguese", "🇧🇷 Portuguese"), ("Persian", "🇮🇷 Persian"), ("Arabic", "🇸🇦 Arabic"),
-    ("Spanish", "🇪🇸 Spanish"), ("Ukrainian", "🇺🇦 Ukrainian"), ("Turkish", "🇹🇷 Turkish"),
-]
-
-WELCOME = (
-    "yo welcome to BrainrotGPT 🗿📈\n\n"
-    "forward me a convo, paste it, or send a screenshot 📸 and i'll cook you a "
-    "single unhinged brainrot reply you can paste straight back 😭🙏\n\n"
-    "how it works:\n"
-    "1️⃣ forward/paste the messages (or a screenshot)\n"
-    "2️⃣ i show what i caught + a ✅ Generate button\n"
-    "3️⃣ tap Generate → receive maximum aura 📈🗿\n\n"
-    "🎭 /settings — style, length, intensity, tone, language, best-of-N\n"
-    "commands: /done · /clear · /settings · /saved · /last · /leaderboard · /daily · /help"
-)
-
-# Commands shown in Telegram's "/" menu (set via set_my_commands on startup).
-# stats is owner-only, so it's intentionally left out of the public menu.
-BOT_COMMANDS = [
-    BotCommand("start", "wake the bot up 🗿"),
-    BotCommand("done", "cook the brainrot reply now 🍳"),
-    BotCommand("settings", "style · length · intensity · tone · language 🎭"),
-    BotCommand("persona", "quick style picker 🎭"),
-    BotCommand("last", "resend your last reply ↩️"),
-    BotCommand("saved", "your saved bangers ⭐"),
-    BotCommand("leaderboard", "top styles this week 📊"),
-    BotCommand("daily", "toggle daily brainrot 🔔"),
-    BotCommand("brainrot", "@mention me or reply in a group 👥"),
-    BotCommand("clear", "wipe the current convo 🗑"),
-    BotCommand("help", "how this thing works ❓"),
-]
-
-HELP = (
-    "BrainrotGPT 🗿\n\n"
-    "• forward/paste messages OR send a screenshot — i'll buffer them\n"
-    "• i show a preview + buttons once you stop sending\n"
-    "• ✅ Generate cooks it · 🔄 Regenerate rerolls · ⭐ Save · 🖼 Share\n"
-    "• best-of-N gives you ◀ ▶ candidates to flip through\n\n"
-    "🎭 /settings — style / length / intensity / tone / language / best-of-N\n"
-    "/persona — quick style picker\n"
-    "/saved — your saved bangers · /last — resend last reply\n"
-    "/leaderboard — top styles this week · /daily — daily brainrot on/off\n"
-    "in groups: add me + @mention me and i'll cook off the recent chat (or reply "
-    "to a msg / use /brainrot). turn my privacy mode OFF in BotFather so i can "
-    "read messages 👀\n"
-    "inline (any chat): @yourbot <paste the text> — inline can only see what you type\n\n"
-    "commands: /done · /clear · /help"
-)
-
-
-def get_session(chat_id: int) -> dict:
-    s = sessions.setdefault(chat_id, {"buffer": [], "candidates": [], "cand_idx": 0})
-    s["ts"] = time.time()
-    return s
-
-
-def group_history(chat_id: int) -> deque:
-    """Rolling buffer of recent group messages (lives on the session so it's
-    evicted by the same idle cleanup). Powers @mention auto-context in groups."""
-    s = get_session(chat_id)
-    dq = s.get("history")
-    if dq is None:
-        dq = deque(maxlen=config.GROUP_HISTORY_SIZE)
-        s["history"] = dq
-    return dq
-
 
 def parse_mention(msg, bot_username: str | None, bot_id: int) -> tuple[bool, str]:
     """Return (was the bot @mentioned, the message text with that mention removed)."""
@@ -168,451 +84,144 @@ def parse_mention(msg, bot_username: str | None, bot_id: int) -> tuple[bool, str
     return mentioned, leftover.strip()
 
 
-# --- Forward-origin helpers (unchanged) -----------------------------------
-
-def sender_name(msg) -> str:
-    fo = getattr(msg, "forward_origin", None)
-    if fo is not None:
-        su = getattr(fo, "sender_user", None)
-        if su is not None:
-            return su.full_name
-        sun = getattr(fo, "sender_user_name", None)
-        if sun:
-            return sun
-        sc = getattr(fo, "sender_chat", None)
-        if sc is not None:
-            return sc.title or "Chat"
-        ch = getattr(fo, "chat", None)
-        if ch is not None:
-            return ch.title or "Channel"
-    ff = getattr(msg, "forward_from", None)
-    if ff is not None:
-        return ff.full_name
-    fsn = getattr(msg, "forward_sender_name", None)
-    if fsn:
-        return fsn
-    return "Them"
+def reply_to_bot(msg, bot_id: int) -> bool:
+    """Was this message a reply to one of the bot's own messages?"""
+    r = getattr(msg, "reply_to_message", None)
+    return bool(r and getattr(r, "from_user", None) and r.from_user.id == bot_id)
 
 
-def is_forwarded(msg) -> bool:
-    return bool(
-        getattr(msg, "forward_origin", None)
-        or getattr(msg, "forward_from", None)
-        or getattr(msg, "forward_sender_name", None)
-    )
+# --- Message intake --------------------------------------------------------
+
+BOND_PER_MESSAGE = 1
+BOND_LONG_MESSAGE = 3
+LONG_MESSAGE_CHARS = 200
+LOW_CONTENT = {"lol", "ok", "okay", "k", "lmao", "yeah", "yea", "no", "nah", "haha", "true"}
+REACTION_CHANCE = 0.35  # a low-content message sometimes just earns an emoji, not a reply
+
+_rng = random.Random()
 
 
-def build_transcript(buffer: list[dict]) -> str:
-    lines = []
-    for m in buffer:
-        if m["sender"]:
-            lines.append(f'{m["sender"]}: {m["text"]}')
-        else:
-            lines.append(m["text"])
-    return "\n".join(lines)
+def apply_bond(state: dict, text: str) -> int:
+    delta = BOND_LONG_MESSAGE if len(text) >= LONG_MESSAGE_CHARS else BOND_PER_MESSAGE
+    return max(-100, min(100, int(state.get("bond") or 0) + delta))
 
 
-def build_preview(buffer: list[dict]) -> str:
-    parts = []
-    for m in buffer:
-        t = m["text"].replace("\n", " ")
-        if len(t) > 120:
-            t = t[:117] + "..."
-        prefix = f'{m["sender"]}: ' if m["sender"] else ""
-        parts.append(f"• {prefix}{t}")
-    preview = "\n".join(parts)
-    if len(preview) > 1500:
-        preview = preview[:1500] + "\n…"
-    return preview
+def is_low_content(text: str) -> bool:
+    stripped = text.strip().lower()
+    return len(stripped) <= 4 or stripped in LOW_CONTENT
 
 
-def split_text(text: str, limit: int = TG_LIMIT) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        cut = text.rfind(" ", 0, limit)
-        if cut <= 0:
-            cut = limit
-        chunks.append(text[:cut])
-        text = text[cut:].lstrip()
-    return chunks
+# Scheduled actions that mean "the kid still owes this person an answer".
+# A reaction must never cancel one of these — see intake_fields.
+OWED_REPLY_KINDS = ("reply", scheduler.RETRY_KIND)
 
 
-def persona_label_of(key: str) -> str:
-    if key == "random":
-        return "🎲 Random"
-    return PERSONA_BY_KEY[key][1] if key in PERSONA_BY_KEY else key
+def intake_fields(state: dict, now: float, *, bond: int, engaged: bool,
+                  schedule: bool = True) -> dict:
+    """The chat_state changes that every message from a real person makes.
 
+    One place, because the three intake paths (text, reaction-only, photo) had
+    each grown a private copy and drifted apart. The reaction path forgot to
+    disarm the ghost ping the *scheduler* had armed, so a user who replies "lol"
+    got pinged as if they'd ghosted; the photo path forgot to clear `gave_up`,
+    which left the chat invisible to both `due_chats` and `coldopen_candidates`
+    — unreachable in either direction, permanently.
 
-# --- Keyboards ------------------------------------------------------------
+    Spec §6: any message from you resets `ping_stage` and clears the pending
+    action. `schedule=False` is the reaction path, where the reaction *is* the
+    answer to this message — see below for exactly what it does and doesn't
+    cancel.
 
-def confirm_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("✅ Generate", callback_data="gen")]]
-    if has_prev:
-        rows.append([InlineKeyboardButton("🔗 Merge with previous", callback_data="merge")])
-    rows.append([
-        InlineKeyboardButton("🎭 Style", callback_data="s:p"),
-        InlineKeyboardButton("⚙️ Settings", callback_data="s:m"),
-    ])
-    rows.append([
-        InlineKeyboardButton("➕ Add more", callback_data="add"),
-        InlineKeyboardButton("🗑 Clear", callback_data="clr"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def confirm_message(session: dict) -> tuple[str, InlineKeyboardMarkup]:
-    """Build the confirm-card text + keyboard, flagging a stashed previous convo."""
-    buf = session["buffer"]
-    n = len(buf)
-    preview = build_preview(buf)
-    has_prev = bool(session.get("prev_buffer"))
-    note = (
-        "\n\n🔗 new convo — your previous one was set aside; tap Merge to combine"
-        if has_prev else ""
-    )
-    text = f"got {n} message(s) 📥\n\n{preview}\n\nready to cook the brainrot reply? 🍳🗿{note}"
-    return text, confirm_keyboard(has_prev)
-
-
-def start_fresh_if_done(session: dict) -> None:
-    """After a reply was produced, treat new input as a NEW convo.
-
-    The finished convo is stashed in prev_buffer so the user can still Merge it.
+    Note `bond` is passed in already clamped by `apply_bond`. The give-up
+    penalty is NOT re-applied here: `scheduler._do_ping` charges it once, at
+    give-up. Charging it again would be charging the user for coming back.
     """
-    if session.get("generated"):
-        session["prev_buffer"] = session.get("buffer", [])
-        session["buffer"] = []
-        session["candidates"] = []
-        session["generated"] = False
+    # Sticky: an undelivered wounded reply stays owed, so the slow salty delay
+    # still applies even if `gave_up` was already cleared by an earlier message.
+    salty = bool(state["gave_up"]) or bool(state["salty"])
+    fields = {
+        "bond": bond,
+        "ping_stage": 0,
+        "last_user_ts": now,
+        "msgs_since_notes": int(state["msgs_since_notes"] or 0) + 1,
+    }
+    if schedule:
+        fields["next_action_kind"] = "reply"
+        # bot.py reads `life` and hands ghost the answer, so ghost.py stays a
+        # pure function of (state, now, rng) with no DB behind it.
+        fields["next_action_at"] = ghost.schedule_reply_at(
+            now, engaged=engaged, bond=bond, salty=salty, rng=_rng,
+            in_school=life.in_school_block(now))
+    elif state["next_action_kind"] not in OWED_REPLY_KINDS:
+        # A reaction cancels a ping or a cold open: both exist to chase someone
+        # who has gone quiet, and someone who just reacted has not. It must NOT
+        # cancel a pending reply, which is the opposite — a debt the kid owes
+        # for an EARLIER message. Reacting to a double-texted "lol" used to
+        # silently delete the answer to the real message before it.
+        fields["next_action_kind"] = None
+        fields["next_action_at"] = None
+    if salty:
+        fields.update(gave_up=0, salty=1)
+    return fields
 
 
-def result_keyboard(total: int, idx: int, truncated: bool) -> InlineKeyboardMarkup:
-    rows = []
-    if total > 1:
-        rows.append([
-            InlineKeyboardButton("◀", callback_data="cprev"),
-            InlineKeyboardButton(f"{idx + 1}/{total}", callback_data="noop"),
-            InlineKeyboardButton("▶", callback_data="cnext"),
-        ])
-    rows.append([
-        InlineKeyboardButton("🔄 Regenerate", callback_data="regen"),
-        InlineKeyboardButton("🗑 New", callback_data="new"),
-    ])
-    row3 = [
-        InlineKeyboardButton("⭐ Save", callback_data="save"),
-        InlineKeyboardButton("🖼 Share", callback_data="share"),
-    ]
-    if truncated:
-        row3.append(InlineKeyboardButton("📋 Full", callback_data="full"))
-    rows.append(row3)
-    return InlineKeyboardMarkup(rows)
-
-
-def settings_text(chat_id: int) -> str:
-    s = db.get_settings(chat_id)
-    return (
-        "⚙️ settings — tap to change\n\n"
-        f"🎭 style: {persona_label_of(s['persona'])}\n"
-        f"📏 length: {LENGTH_LABELS.get(s['length'], s['length'])}\n"
-        f"🎚 intensity: {INTENSITY_LABELS.get(s['intensity'], s['intensity'])}\n"
-        f"🎯 tone: {TONE_LABELS.get(s['tone'], s['tone'])}\n"
-        f"🌐 language: {s['language']}\n"
-        f"🎲 best-of: {s['candidates']}"
-    )
-
-
-def settings_kb(chat_id: int) -> InlineKeyboardMarkup:
-    s = db.get_settings(chat_id)
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(f"🎭 {persona_label_of(s['persona'])}", callback_data="s:p"),
-            InlineKeyboardButton(f"📏 {LENGTH_LABELS.get(s['length'], s['length'])}", callback_data="s:len"),
-        ],
-        [
-            InlineKeyboardButton(INTENSITY_LABELS.get(s["intensity"], s["intensity"]), callback_data="s:i"),
-            InlineKeyboardButton(TONE_LABELS.get(s["tone"], s["tone"]), callback_data="s:t"),
-        ],
-        [
-            InlineKeyboardButton(f"🌐 {s['language']}", callback_data="s:l"),
-            InlineKeyboardButton(f"🎲 Best-of {s['candidates']}", callback_data="s:c"),
-        ],
-        [InlineKeyboardButton("⬅️ Done", callback_data="s:done")],
-    ])
-
-
-def persona_kb() -> InlineKeyboardMarkup:
-    opts = [("random", "🎲 Random")] + [(k, label) for k, label, _ in PERSONAS]
-    rows, row = [], []
-    for k, label in opts:
-        row.append(InlineKeyboardButton(label, callback_data=f"v:p:{k}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="s:m")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _simple_kb(field: str, options: list[tuple[str, str]], columns: int = 2) -> InlineKeyboardMarkup:
-    rows, row = [], []
-    for value, label in options:
-        row.append(InlineKeyboardButton(label, callback_data=f"v:{field}:{value}"))
-        if len(row) == columns:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="s:m")])
-    return InlineKeyboardMarkup(rows)
-
-
-def intensity_kb():
-    return _simple_kb("i", [(k, v) for k, v in INTENSITY_LABELS.items()])
-
-
-def length_kb():
-    return _simple_kb("len", [(k, v) for k, v in LENGTH_LABELS.items()])
-
-
-def tone_kb():
-    return _simple_kb("t", [(k, v) for k, v in TONE_LABELS.items()])
-
-
-def lang_kb():
-    return _simple_kb("l", [(v, lbl) for v, lbl in LANGS], columns=3)
-
-
-def cand_kb():
-    return _simple_kb("c", [(str(n), f"🎲 {n}") for n in range(1, config.MAX_CANDIDATES + 1)])
-
-
-# --- Commands -------------------------------------------------------------
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME)
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP)
-
-
-async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = get_session(update.effective_chat.id)
-    s["buffer"] = []
-    s["prev_buffer"] = []
-    s["candidates"] = []
-    s["generated"] = False
-    await update.message.reply_text("cleared 🗑️ send a fresh convo whenever 🙏")
-
-
-async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    for job in context.job_queue.get_jobs_by_name(f"confirm_{chat_id}"):
-        job.schedule_removal()
-    await show_confirm(context.bot, chat_id)
-
-
-async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    await update.message.reply_text(settings_text(cid), reply_markup=settings_kb(cid))
-
-
-async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎭 pick a style:", reply_markup=persona_kb())
-
-
-async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    last = db.get_last_result(update.effective_chat.id)
-    if not last:
-        await update.message.reply_text("no reply cooked yet 😅 send a convo first 🙏")
-        return
-    for chunk in split_text(last["text"]):
-        await update.message.reply_text(chunk)
-
-
-async def cmd_saved(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    favs = db.list_favorites(cid, limit=5)
-    if not favs:
-        await update.message.reply_text("no saved bangers yet ⭐ tap Save on a reply 🙏")
-        return
-    await update.message.reply_text(f"⭐ your last {len(favs)} saved:")
-    for f in favs:
-        snippet = f["text"] if len(f["text"]) <= TG_LIMIT - 100 else f["text"][:TG_LIMIT - 100] + "…"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Delete", callback_data=f"favdel:{f['id']}")]])
-        await update.message.reply_text(
-            f"{persona_label_of(f['persona'])}\n\n{snippet}", reply_markup=kb
-        )
-
-
-async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = db.leaderboard(days=7)
-    if not rows:
-        await update.message.reply_text("no data yet 📊 cook some replies first 🗿")
-        return
-    medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 10
-    lines = ["📊 top styles this week:\n"]
-    for i, r in enumerate(rows):
-        lines.append(f"{medals[i]} {persona_label_of(r['persona'])} — {r['n']}")
-    await update.message.reply_text("\n".join(lines))
-
-
-async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    sub = db.get_subscription(cid)
-    if sub and sub["enabled"]:
-        db.remove_subscription(cid)
-        for job in context.job_queue.get_jobs_by_name(f"daily_{cid}"):
-            job.schedule_removal()
-        await update.message.reply_text("daily brainrot OFF 🔕")
-    else:
-        db.set_subscription(cid, config.DAILY_DEFAULT_HOUR, True)
-        schedule_daily(context.job_queue, cid, config.DAILY_DEFAULT_HOUR)
-        await update.message.reply_text(
-            f"daily brainrot ON 🔔 you'll get one every day around {config.DAILY_DEFAULT_HOUR:02d}:00 🗿"
-        )
-
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not guard.is_owner(update.effective_user.id):
-        await update.message.reply_text("owner only 🔒")
-        return
-    s = db.stats()
-    await update.message.reply_text(
-        "📈 stats\n\n"
-        f"total generations: {s['total']}\n"
-        f"last 24h: {s['last_24h']}\n"
-        f"unique users: {s['users']}\n"
-        f"regenerates: {s['regens']}\n"
-        f"saved favorites: {s['favorites']}"
-    )
-
-
-async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner-only live-trends curation: /trend [list|add <t>|ban <t>|remove <t>|refresh].
-
-    Trends are mixed into every generated reply, so this is gated to owners.
-    """
-    if not guard.is_owner(update.effective_user.id):
-        await update.message.reply_text("owner only 🔒")
-        return
-    args = context.args or []
-    sub = args[0].lower() if args else "list"
-    rest = " ".join(args[1:]).strip()
-
-    if sub in ("list", "ls"):
-        rows = db.list_trends(limit=40)
-        auto = db.count_trends(source="auto")
-        if not rows:
-            await update.message.reply_text(
-                "no live trends yet 📭\nadd one: /trend add 67 · pull some: /trend refresh"
-            )
-            return
-        lines = [f"🔥 live trends ({len(rows)} shown · {auto} auto) — mixed into replies:\n"]
-        for r in rows:
-            lines.append(f"{'🤖' if r['source'] == 'auto' else '✍️'} {r['term']}")
-        lines.append("\n/trend add <t> · ban <t> · remove <t> · refresh")
-        await update.message.reply_text("\n".join(lines))
-        return
-
-    if sub == "add":
-        if not rest:
-            await update.message.reply_text("usage: /trend add <term>")
-            return
-        ok = db.add_trend(rest, source="manual")
-        await update.message.reply_text(f"added ✅ {rest}" if ok else f"already live / banned 🤔 {rest}")
-        return
-
-    if sub in ("ban", "block"):
-        if not rest:
-            await update.message.reply_text("usage: /trend ban <term>")
-            return
-        db.ban_trend(rest)
-        await update.message.reply_text(f"banned 🚫 {rest} (hidden + won't auto-readd)")
-        return
-
-    if sub in ("remove", "rm", "del", "delete"):
-        if not rest:
-            await update.message.reply_text("usage: /trend remove <term>")
-            return
-        ok = db.remove_trend(rest)
-        await update.message.reply_text(f"removed 🗑 {rest}" if ok else f"not found 🤷 {rest}")
-        return
-
-    if sub == "refresh":
-        await update.message.reply_text("pulling fresh trends 🔄… (best-effort)")
-        try:
-            n = await trends.refresh()
-        except Exception as e:  # noqa: BLE001
-            await update.message.reply_text(f"refresh failed 😭 ({str(e)[:80]})")
-            return
-        await update.message.reply_text(f"done ✅ +{n} new — see /trend list")
-        return
-
-    await update.message.reply_text(
-        "usage: /trend [list | add <t> | ban <t> | remove <t> | refresh]"
-    )
-
-
-async def cmd_brainrot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Group mode: reply to a message with /brainrot, or /brainrot <text>."""
-    msg = update.message
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    if not guard.is_allowed_user(user_id):
-        await msg.reply_text("this bot is private 🔒")
-        return
-    parts = []
-    reply = msg.reply_to_message
-    if reply is not None and (reply.text or reply.caption):
-        name = reply.from_user.full_name if reply.from_user else "Them"
-        parts.append({"sender": name, "text": reply.text or reply.caption})
-    if context.args:
-        parts.append({"sender": None, "text": " ".join(context.args)})
-    if not parts:  # bare /brainrot → fall back to the recent group buffer
-        parts = list(group_history(chat_id))
-    if not parts:
-        await msg.reply_text("reply to a msg, @mention me, or /brainrot <text> 🙏")
-        return
-    allowed, reason = limiter.check(user_id)
-    if not allowed:
-        await msg.reply_text(reason)
-        return
-    session = get_session(chat_id)
-    session["buffer"] = parts
-    status = await msg.reply_text(COOKING_FRAMES[0])
-    limiter.record(user_id)
-    await cook(context, chat_id, user_id, status, regen=False)
-
-
-# --- Message intake + debounce -------------------------------------------
-
-async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A real person texted. Record it, reset the ghost ladder, schedule a reply."""
     msg = update.message
     if msg is None:
         return
     text = msg.text or msg.caption
     if not text:
-        await msg.reply_text("send me text, a screenshot 📸, or forwarded messages 🙏")
         return
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
-    start_fresh_if_done(session)
-    session["buffer"].append(
-        {"sender": sender_name(msg) if is_forwarded(msg) else None, "text": text}
-    )
-    schedule_confirm(context, chat_id)
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        return
+    ok, _ = guard.screen_input(text)
+    if not ok:
+        return
+    # Protects the Groq quota from a chatty/abusive user. A refusal is silent —
+    # a person who's tapped out just doesn't answer; the bot never explains.
+    allowed, _ = limiter.check(user_id)
+    if not allowed:
+        return
+
+    now = time.time()
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
+        return
+    db.add_message(chat_id, "user", text)
+    limiter.record(user_id)
+
+    # A low-content message sometimes earns just a reaction — and arms no ghost
+    # ping, because there is nothing to chase. It must still DISARM any ping the
+    # scheduler already armed: the reaction is the kid answering, not ignoring.
+    if is_low_content(text) and _rng.random() < REACTION_CHANCE:
+        try:
+            await msg.set_reaction(_rng.choice(["💀", "🔥", "👀", "😭", "🗿"]))
+        except Exception as e:  # noqa: BLE001 — reactions are cosmetic
+            logger.debug("reaction failed: %s", e)
+        else:
+            db.update_chat_state(chat_id, **intake_fields(
+                state, now, bond=apply_bond(state, text), engaged=True, schedule=False))
+            return
+
+    engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < 120)
+    db.update_chat_state(chat_id, **intake_fields(
+        state, now, bond=apply_bond(state, text), engaged=engaged))
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The kid looks at the picture and reacts to it in a burst — same
+    scheduling path as a text message. No status message: a person doesn't
+    narrate that they're looking at your photo."""
     msg = update.message
+    if msg is None:
+        return          # an edited_message arrives with update.message unset
     chat_id = update.effective_chat.id
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        return
     file_id = None
     if msg.photo:
         file_id = msg.photo[-1].file_id
@@ -620,31 +229,45 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = msg.document.file_id
     if not file_id:
         return
-    status = await msg.reply_text("reading the screenshot 👀📸…")
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
+        return
+    # A photo costs a multimodal call, so it needs the same quota guard a text
+    # message gets — otherwise one user spamming an album drains Groq for every
+    # chat. Silent refusal, like everywhere else.
+    allowed, _ = limiter.check(user_id)
+    if not allowed:
+        return
     try:
         tg_file = await context.bot.get_file(file_id)
         data = await tg_file.download_as_bytearray()
         transcript = await vision.transcribe_image(bytes(data))
-    except vision.VisionError as e:
-        await status.edit_text(f"couldn't read that one 😭 ({e})\ntry pasting the text instead 🙏")
-        return
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — the kid never surfaces an error
         logger.warning("photo intake failed: %s", e)
-        await status.edit_text("couldn't read that image 😭 try pasting the text instead 🙏")
         return
-    session = get_session(chat_id)
-    start_fresh_if_done(session)
-    session["buffer"].append({"sender": None, "text": transcript})
-    await status.edit_text("got the screenshot ✅")
-    schedule_confirm(context, chat_id)
+    # The transcript is model output describing an untrusted image; screen it
+    # before it becomes conversation history the prompt builder will replay.
+    ok, _ = guard.screen_input(transcript)
+    if not ok:
+        return
+    limiter.record(user_id)
+    now = time.time()
+    db.add_message(chat_id, "user", f"[they sent a picture. it shows: {transcript}]")
+    # A photo is a message from a person: it revives a given-up chat exactly as
+    # text does. Without this the reply is scheduled on a row `due_chats` skips.
+    db.update_chat_state(chat_id, **intake_fields(
+        state, now, bond=apply_bond(state, ""), engaged=True))
+
+
+GROUP_MAX_MESSAGES = 2
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """In groups: buffer recent messages, and when the bot is @mentioned (or its
-    own message is replied to) cook a brainrot reply off that recent context.
+    """In groups: reply only on @mention or a reply to the bot, capped, and
+    never proactive — unprompted messages in a group read as spam.
 
-    Needs privacy mode OFF in BotFather (/setprivacy → Disable) to receive the
-    non-mention messages; with privacy ON only the mention/reply itself is seen.
+    Needs privacy mode OFF in BotFather (/setprivacy → Disable) to receive
+    messages that don't @mention the bot.
     """
     msg = update.message
     if msg is None or not (msg.text or msg.caption):
@@ -652,384 +275,26 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     me = context.bot
     if msg.from_user and msg.from_user.id == me.id:
         return  # never buffer or react to our own messages
-    chat_id = update.effective_chat.id
-    text = msg.text or msg.caption
-
-    mentioned, leftover = parse_mention(msg, me.username, me.id)
-    reply = msg.reply_to_message
-    reply_to_bot = bool(reply and reply.from_user and reply.from_user.id == me.id)
-
-    if not (mentioned or reply_to_bot):
-        sender = msg.from_user.full_name if msg.from_user else "Them"
-        group_history(chat_id).append({"sender": sender, "text": text})
-        return
-
-    # --- summoned: cook a reply off the recent buffer + this message ---
     user_id = msg.from_user.id if msg.from_user else 0
     if not guard.is_allowed_user(user_id):
-        await msg.reply_text("this bot is private 🔒")
         return
-
-    parts = list(group_history(chat_id))
-    if reply and reply.from_user and reply.from_user.id != me.id and (reply.text or reply.caption):
-        entry = {"sender": reply.from_user.full_name, "text": reply.text or reply.caption}
-        if entry not in parts:
-            parts.append(entry)
-    if leftover:  # whatever they typed next to the @mention — use it + remember it
-        entry = {"sender": msg.from_user.full_name if msg.from_user else None, "text": leftover}
-        parts.append(entry)
-        group_history(chat_id).append(entry)
-
-    if not parts:
-        await msg.reply_text(
-            "mention me after a few messages and i'll cook a reply 🍳🗿\n"
-            "(heads up: i only see messages sent after i joined — turn my privacy "
-            "mode OFF in BotFather so i can read the chat)"
-        )
-        return
-
-    allowed, reason = limiter.check(user_id)
-    if not allowed:
-        await msg.reply_text(reason)
-        return
-
-    session = get_session(chat_id)
-    session["buffer"] = parts
-    status = await msg.reply_text(COOKING_FRAMES[0])
-    limiter.record(user_id)
-    await cook(context, chat_id, user_id, status, regen=False)
-
-
-def schedule_confirm(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    name = f"confirm_{chat_id}"
-    for job in context.job_queue.get_jobs_by_name(name):
-        job.schedule_removal()
-    context.job_queue.run_once(send_confirm_job, DEBOUNCE_S, chat_id=chat_id, name=name)
-
-
-async def send_confirm_job(context: ContextTypes.DEFAULT_TYPE):
-    await show_confirm(context.bot, context.job.chat_id)
-
-
-async def show_confirm(bot, chat_id: int):
-    session = get_session(chat_id)
-    if not session["buffer"]:
-        return
-    text, kb = confirm_message(session)
-    await bot.send_message(chat_id, text, reply_markup=kb)
-
-
-# --- Cooking animation ----------------------------------------------------
-
-COOKING_FRAMES = [
-    "cooking the brainrot reply 🍳🗿",
-    "aura farming the response 📈🗿",
-    "consulting the skibidi council 🚽👑",
-    "calculating the Fanum Tax 🍕📊",
-    "John Pork is on the phone 📞🐷",
-    "channeling maximum rizz 😭🙏",
-    "escaping the shadow realm 🌌",
-    "running interdimensional audit 👁️📈",
-]
-_DOTS = ["", ".", "..", "..."]
-ANIM_INTERVAL = 0.8
-
-
-async def animate(bot, chat_id, message_id, stop: asyncio.Event, last: str):
-    i = 0
-    while not stop.is_set():
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=ANIM_INTERVAL)
-            break
-        except TimeoutError:
-            pass
-        i += 1
-        frame = COOKING_FRAMES[(i // len(_DOTS)) % len(COOKING_FRAMES)]
-        text = f"{frame}{_DOTS[i % len(_DOTS)]}"
-        if text == last:
-            continue
-        try:
-            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
-            last = text
-        except Exception:  # noqa: BLE001
-            pass
-
-
-# --- Core generation ------------------------------------------------------
-
-async def _fail(bot, chat_id, mid, e):
-    logger.warning("generation failed: %s", e)
-    err = f"bro the kitchen exploded 😭🍳💀 ({e})\ntry again with /done"
-    try:
-        await bot.edit_message_text(err, chat_id=chat_id, message_id=mid)
-    except Exception:  # noqa: BLE001
-        await bot.send_message(chat_id, err)
-
-
-async def _cook_stream(bot, chat_id, mid, transcript, settings, avoid_text, avoid_persona):
-    persona = brainrot.choose_persona(settings, avoid_persona=avoid_persona)
-    last_edit = 0.0
-    text = ""
-    async for partial in brainrot.generate_stream(
-        transcript, settings, persona, avoid_text=avoid_text
-    ):
-        text = partial
-        now = time.monotonic()
-        if now - last_edit >= 1.1:
-            try:
-                await bot.edit_message_text(partial[:MSG_CAP], chat_id=chat_id, message_id=mid)
-            except Exception:  # noqa: BLE001
-                pass
-            last_edit = now
-    return BrainrotResult(text=text, persona_key=persona[0], persona_label=persona[1], tokens=len(text) // 4)
-
-
-async def cook(context, chat_id, user_id, status_msg, regen=False):
-    bot = context.bot
-    mid = status_msg.message_id
-    session = get_session(chat_id)
-    transcript = build_transcript(session["buffer"])
-    if not transcript.strip():
-        await bot.edit_message_text("buffer's empty 😅 send a convo first 🙏", chat_id=chat_id, message_id=mid)
-        return
-    ok, reason = guard.screen_input(transcript)
-    if not ok:
-        await bot.edit_message_text(reason, chat_id=chat_id, message_id=mid)
-        return
-
-    settings = db.get_settings(chat_id)
-    avoid_text = avoid_persona = None
-    if regen:
-        last = db.get_last_result(chat_id)
-        if last:
-            avoid_text, avoid_persona = last["text"], last["persona"]
-
-    await bot.send_chat_action(chat_id, ChatAction.TYPING)
-    n = int(settings.get("candidates", 1))
-
-    if config.STREAMING and n == 1:
-        try:
-            results = [await _cook_stream(bot, chat_id, mid, transcript, settings, avoid_text, avoid_persona)]
-        except BrainrotError as e:
-            await _fail(bot, chat_id, mid, e)
-            return
-    else:
-        stop = asyncio.Event()
-        anim = asyncio.create_task(animate(bot, chat_id, mid, stop, COOKING_FRAMES[0]))
-        try:
-            if n > 1:
-                results = await brainrot.generate_many(
-                    transcript, settings, n, avoid_text=avoid_text, avoid_persona=avoid_persona
-                )
-            else:
-                results = [await brainrot.generate(
-                    transcript, settings, avoid_text=avoid_text, avoid_persona=avoid_persona
-                )]
-        except BrainrotError as e:
-            stop.set()
-            await anim
-            await _fail(bot, chat_id, mid, e)
-            return
-        stop.set()
-        await anim
-
-    session["candidates"] = results
-    session["cand_idx"] = 0
-    session["generated"] = True  # next new message starts a fresh convo (with Merge option)
-    top = results[0]
-    db.set_last_result(chat_id, top.text, top.persona_key)
-    db.log_generation(
-        chat_id, user_id, top.persona_key, settings["intensity"],
-        settings["tone"], regen, sum(r.tokens for r in results),
-    )
-    await render_result(bot, chat_id, mid, session)
-
-
-async def render_result(bot, chat_id, mid, session):
-    results = session.get("candidates") or []
-    if not results:
-        return
-    idx = session.get("cand_idx", 0) % len(results)
-    r = results[idx]
-    # Output is just the reply — no "— persona" footer (paste-ready). The
-    # best-of-N counter lives in the keyboard, so nothing useful is lost.
-    body = r.text
-    truncated = False
-    if len(body) > MSG_CAP:
-        body = body[: MSG_CAP - 1].rstrip()
-        truncated = True
-    display = f"{body}…" if truncated else body
-    kb = result_keyboard(len(results), idx, truncated)
-    try:
-        await bot.edit_message_text(display, chat_id=chat_id, message_id=mid, reply_markup=kb)
-    except Exception:  # noqa: BLE001
-        await bot.send_message(chat_id, display, reply_markup=kb)
-
-
-# --- Buttons --------------------------------------------------------------
-
-async def handle_settings_cb(query, chat_id, data):
-    await query.answer()
-    if data == "s:done":
-        session = get_session(chat_id)
-        if session.get("buffer"):
-            text, kb = confirm_message(session)
-            await query.edit_message_text(text, reply_markup=kb)
-        else:
-            await query.edit_message_text("settings saved ✅ send a convo whenever 🙏")
-        return
-    if data == "s:m":
-        await query.edit_message_text(settings_text(chat_id), reply_markup=settings_kb(chat_id))
-        return
-    if data == "s:p":
-        await query.edit_message_text("🎭 pick a style:", reply_markup=persona_kb())
-        return
-    if data == "s:len":
-        await query.edit_message_text("📏 pick output length:", reply_markup=length_kb())
-        return
-    if data == "s:i":
-        await query.edit_message_text("🎚 pick intensity (how feral):", reply_markup=intensity_kb())
-        return
-    if data == "s:t":
-        await query.edit_message_text("🎯 pick a tone:", reply_markup=tone_kb())
-        return
-    if data == "s:l":
-        await query.edit_message_text("🌐 pick a language:", reply_markup=lang_kb())
-        return
-    if data == "s:c":
-        await query.edit_message_text("🎲 how many candidates? (best-of-N)", reply_markup=cand_kb())
-        return
-    if data.startswith("v:"):
-        _, field, value = data.split(":", 2)
-        keymap = {
-            "p": "persona", "i": "intensity", "len": "length",
-            "t": "tone", "l": "language", "c": "candidates",
-        }
-        key = keymap.get(field)
-        if key:
-            try:
-                db.set_setting(chat_id, key, int(value) if field == "c" else value)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("bad setting %s=%s: %s", key, value, e)
-        await query.edit_message_text(settings_text(chat_id), reply_markup=settings_kb(chat_id))
-        return
-
-
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
     chat_id = update.effective_chat.id
-    user_id = query.from_user.id
-    session = get_session(chat_id)
-
-    if data == "noop":
-        await query.answer()
+    mentioned, leftover = parse_mention(msg, me.username, me.id)
+    summoned = mentioned or reply_to_bot(msg, me.id)
+    text = leftover if mentioned else (msg.text or msg.caption)
+    if not text:
         return
-
-    if data.startswith("s:") or data.startswith("v:"):
-        await handle_settings_cb(query, chat_id, data)
+    ok, _ = guard.screen_input(text)
+    if not ok:
         return
-
-    if data.startswith("favdel:"):
-        await query.answer("deleted 🗑")
-        db.delete_favorite(int(data.split(":", 1)[1]), chat_id)
-        try:
-            await query.edit_message_text("deleted 🗑")
-        except Exception:  # noqa: BLE001
-            pass
+    db.add_message(chat_id, "user", text)
+    if not summoned:
         return
-
-    if data == "add":
-        await query.answer()
-        await query.edit_message_text("aight, forward/paste more then hit /done 👍")
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
         return
-
-    if data == "merge":
-        prev = session.get("prev_buffer")
-        if not prev:
-            await query.answer("nothing to merge 😅")
-            return
-        await query.answer("merged 🔗")
-        session["buffer"] = prev + session.get("buffer", [])
-        session["prev_buffer"] = []
-        text, kb = confirm_message(session)
-        await query.edit_message_text(text, reply_markup=kb)
-        return
-
-    if data in ("clr", "new"):
-        await query.answer()
-        session["buffer"] = []
-        session["prev_buffer"] = []
-        session["candidates"] = []
-        session["generated"] = False
-        await query.edit_message_text("cleared 🗑️ send a fresh convo whenever 🙏")
-        return
-
-    if data in ("cprev", "cnext"):
-        results = session.get("candidates")
-        if not results:
-            await query.answer("nothing to flip through 😅")
-            return
-        await query.answer()
-        session["cand_idx"] = (session.get("cand_idx", 0) + (1 if data == "cnext" else -1)) % len(results)
-        await render_result(context.bot, chat_id, query.message.message_id, session)
-        return
-
-    if data == "save":
-        results = session.get("candidates")
-        if not results:
-            await query.answer("nothing to save 😅")
-            return
-        r = results[session.get("cand_idx", 0)]
-        db.add_favorite(chat_id, user_id, r.text, r.persona_key)
-        await query.answer("saved ⭐ (see /saved)")
-        return
-
-    if data == "full":
-        results = session.get("candidates")
-        if not results:
-            await query.answer()
-            return
-        await query.answer()
-        for chunk in split_text(results[session.get("cand_idx", 0)].text):
-            await context.bot.send_message(chat_id, chunk)
-        return
-
-    if data == "share":
-        results = session.get("candidates")
-        if not results:
-            await query.answer("nothing to share 😅")
-            return
-        if not share_card.available():
-            await query.answer("image rendering not installed 🙏 (pip install pillow)", show_alert=True)
-            return
-        await query.answer("rendering 🖼")
-        r = results[session.get("cand_idx", 0)]
-        try:
-            png = share_card.render(r.text, r.persona_label)
-            await context.bot.send_photo(chat_id, photo=io.BytesIO(png))
-        except Exception as e:  # noqa: BLE001
-            await context.bot.send_message(chat_id, f"couldn't render card 😭 ({str(e)[:80]})")
-        return
-
-    if data in ("gen", "regen"):
-        if not guard.is_allowed_user(user_id):
-            await query.answer("this bot is private 🔒", show_alert=True)
-            return
-        if not session.get("buffer"):
-            await query.answer("buffer's empty, send a convo first 😅", show_alert=True)
-            return
-        allowed, reason = limiter.check(user_id)
-        if not allowed:
-            await query.answer(reason, show_alert=True)
-            return
-        await query.answer()
-        try:
-            await query.edit_message_text(COOKING_FRAMES[0])
-        except Exception:  # noqa: BLE001
-            pass
-        limiter.record(user_id)
-        await cook(context, chat_id, user_id, query.message, regen=(data == "regen"))
+    pieces = (await chat_engine.reply(chat_id, state, rng=_rng))[:GROUP_MAX_MESSAGES]
+    await scheduler.deliver(context.bot, chat_id, pieces, state, reply_to=msg.message_id)
 
 
 # --- Inline mode ----------------------------------------------------------
@@ -1077,70 +342,39 @@ async def on_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# --- Scheduled jobs -------------------------------------------------------
-
-def schedule_daily(job_queue, chat_id: int, hour: int):
-    name = f"daily_{chat_id}"
-    for job in job_queue.get_jobs_by_name(name):
-        job.schedule_removal()
-    job_queue.run_daily(
-        daily_job, time=datetime.time(hour=hour % 24), name=name, chat_id=chat_id
-    )
-
-
-async def daily_job(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
-    settings = db.get_settings(chat_id)
-    try:
-        res = await brainrot.generate(brainrot.DAILY_PROMPT, settings)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("daily job failed for %s: %s", chat_id, e)
-        return
-    db.log_generation(chat_id, 0, res.persona_key, settings["intensity"], settings["tone"], False, res.tokens)
-    text = res.text
-    if len(text) > MSG_CAP:
-        text = text[:MSG_CAP] + "…"
-    await context.bot.send_message(chat_id, f"🌅 your daily brainrot 🗿\n\n{text}\n\n— {res.persona_label}")
-
-
-async def cleanup_sessions(context: ContextTypes.DEFAULT_TYPE):
-    now = time.time()
-    stale = [cid for cid, s in sessions.items() if now - s.get("ts", now) > SESSION_TTL_S]
-    for cid in stale:
-        sessions.pop(cid, None)
-    if stale:
-        logger.info("cleaned %d idle session(s)", len(stale))
-
-
-async def trend_refresh_job(context: ContextTypes.DEFAULT_TYPE):
-    """Scheduled best-effort pull of fresh slang into the live trends table."""
-    try:
-        n = await trends.refresh()
-        logger.info("scheduled trend refresh added %d term(s)", n)
-    except Exception as e:  # noqa: BLE001 — never let the job crash the queue
-        logger.warning("trend refresh job failed: %s", e)
-
-
 # --- Lifecycle ------------------------------------------------------------
+#
+# The kid's own schedule (the 60s tick, burst delivery, daily jobs) lives in
+# scheduler.py — see that module's docstring for why. bot.py only registers it.
 
 async def on_startup(app: Application):
     db.init_db()
-    limiter.seed(db.recent_generation_times(60))
-    app.job_queue.run_repeating(cleanup_sessions, interval=600, first=600)
-    for sub in db.list_subscriptions():
-        schedule_daily(app.job_queue, sub["chat_id"], sub["hour"])
+    try:
+        await app.bot.set_my_commands(commands.BOT_COMMANDS)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("failed to set command menu: %s", e)
+    await stickers.load(app.bot)
+
+    app.job_queue.run_repeating(scheduler.tick, interval=60, first=10, name="tick")
+    app.job_queue.run_repeating(scheduler.prune_job, interval=600, first=600, name="prune")
+    app.job_queue.run_daily(
+        scheduler.life_refresh_job,
+        time=datetime.time(hour=config.LIFE_REFRESH_HOUR % 24),
+        name="life_refresh",
+    )
+    app.job_queue.run_daily(
+        scheduler.sticker_reload_job, time=datetime.time(hour=4), name="sticker_reload")
     if config.TREND_FETCH_ENABLED:
         app.job_queue.run_daily(
-            trend_refresh_job,
+            scheduler.trend_refresh_job,
             time=datetime.time(hour=config.TREND_FETCH_HOUR % 24),
             name="trend_refresh",
         )
         if db.count_trends(source="auto") == 0:  # seed shortly after first boot
-            app.job_queue.run_once(trend_refresh_job, when=120, name="trend_refresh_seed")
-    try:
-        await app.bot.set_my_commands(BOT_COMMANDS)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("failed to set command menu: %s", e)
+            app.job_queue.run_once(scheduler.trend_refresh_job, when=120, name="trend_refresh_seed")
+    if not life.current():
+        app.job_queue.run_once(scheduler.life_refresh_job, when=30, name="life_seed")
+
     logger.info("startup complete (model=%s, fallback=%s)", config.GROQ_MODEL, config.GROQ_FALLBACK_MODEL)
 
 
@@ -1205,30 +439,22 @@ def main():
         .post_shutdown(on_shutdown)
         .build()
     )
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("done", cmd_done))
-    app.add_handler(CommandHandler(["clear", "cancel"], cmd_clear))
-    app.add_handler(CommandHandler("settings", cmd_settings))
-    app.add_handler(CommandHandler("persona", cmd_persona))
-    app.add_handler(CommandHandler("last", cmd_last))
-    app.add_handler(CommandHandler("saved", cmd_saved))
-    app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
-    app.add_handler(CommandHandler("daily", cmd_daily))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CommandHandler("trend", cmd_trend))
-    app.add_handler(CommandHandler("brainrot", cmd_brainrot))
-    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(CommandHandler("start", commands.cmd_start))
+    app.add_handler(CommandHandler("help", commands.cmd_help))
+    app.add_handler(CommandHandler("settings", commands.cmd_settings))
+    app.add_handler(CommandHandler("shutup", commands.cmd_shutup))
+    app.add_handler(CommandHandler("yo", commands.cmd_yo))
+    app.add_handler(CommandHandler("trend", commands.cmd_trend))
+    app.add_handler(CommandHandler("stickers", commands.cmd_stickers))
+    app.add_handler(CallbackQueryHandler(commands.on_button))
     app.add_handler(InlineQueryHandler(on_inline))
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), on_photo
-    ))
+        filters.ChatType.PRIVATE & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+        on_user_message))
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, on_message
-    ))
+        filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), on_photo))
     app.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_group_message
-    ))
+        filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION), on_group_message))
     app.add_error_handler(on_error)
 
     if config.WEBHOOK_URL:

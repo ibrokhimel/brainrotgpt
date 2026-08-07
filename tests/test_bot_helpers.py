@@ -4,78 +4,6 @@ from telegram.error import Conflict
 
 import bot
 
-
-def test_build_transcript_labels_senders():
-    buf = [{"sender": "Alex", "text": "hi"}, {"sender": None, "text": "yo"}]
-    assert bot.build_transcript(buf) == "Alex: hi\nyo"
-
-
-def test_split_text_short_is_single():
-    assert bot.split_text("hello") == ["hello"]
-
-
-def test_split_text_long_splits_under_limit():
-    text = "word " * 2000  # ~10k chars
-    chunks = bot.split_text(text, limit=4096)
-    assert len(chunks) > 1
-    assert all(len(c) <= 4096 for c in chunks)
-
-
-def test_build_preview_truncates_long_lines():
-    buf = [{"sender": None, "text": "x" * 500}]
-    preview = bot.build_preview(buf)
-    assert "..." in preview
-    assert len(preview) < 500
-
-
-def test_persona_label_random():
-    assert bot.persona_label_of("random") == "🎲 Random"
-    assert "Sigma" in bot.persona_label_of("sigma")
-
-
-def test_keyboards_build():
-    # smoke: keyboards construct without error
-    assert bot.confirm_keyboard().inline_keyboard
-    assert bot.result_keyboard(3, 0, True).inline_keyboard
-    assert bot.persona_kb().inline_keyboard
-    assert bot.intensity_kb().inline_keyboard
-    assert bot.length_kb().inline_keyboard
-    assert bot.lang_kb().inline_keyboard
-    assert bot.cand_kb().inline_keyboard
-
-
-def _callbacks(kb):
-    return {b.callback_data for row in kb.inline_keyboard for b in row}
-
-
-def test_merge_button_only_with_prev():
-    assert "merge" not in _callbacks(bot.confirm_keyboard(has_prev=False))
-    assert "merge" in _callbacks(bot.confirm_keyboard(has_prev=True))
-
-
-def test_start_fresh_archives_after_generated():
-    session = {"buffer": [{"sender": None, "text": "old"}], "candidates": ["x"], "generated": True}
-    bot.start_fresh_if_done(session)
-    assert session["buffer"] == []
-    assert session["prev_buffer"] == [{"sender": None, "text": "old"}]
-    assert session["candidates"] == []
-    assert session["generated"] is False
-
-
-def test_start_fresh_noop_while_building():
-    session = {"buffer": [{"sender": None, "text": "a"}], "generated": False}
-    bot.start_fresh_if_done(session)
-    assert session["buffer"] == [{"sender": None, "text": "a"}]
-    assert "prev_buffer" not in session
-
-
-def test_confirm_message_flags_prev():
-    session = {"buffer": [{"sender": None, "text": "new"}], "prev_buffer": [{"sender": None, "text": "old"}]}
-    text, kb = bot.confirm_message(session)
-    assert "Merge" in text
-    assert "merge" in _callbacks(kb)
-
-
 # --- group mode helpers ---------------------------------------------------
 
 class _Ent:
@@ -89,11 +17,12 @@ class _User:
 
 
 class _GMsg:
-    def __init__(self, text, entities=None):
+    def __init__(self, text, entities=None, reply_to_message=None):
         self.text = text
         self.caption = None
         self.entities = entities or []
         self.caption_entities = []
+        self.reply_to_message = reply_to_message
 
 
 def test_parse_mention_detects_and_strips():
@@ -116,14 +45,23 @@ def test_parse_mention_text_mention_by_id():
     assert mentioned is True
 
 
-def test_group_history_rolls_to_maxlen():
-    cid = -100123
-    bot.group_history(cid).clear()
-    for i in range(bot.config.GROUP_HISTORY_SIZE + 5):
-        bot.group_history(cid).append({"sender": None, "text": str(i)})
-    dq = bot.group_history(cid)
-    assert len(dq) == bot.config.GROUP_HISTORY_SIZE
-    assert dq[-1]["text"] == str(bot.config.GROUP_HISTORY_SIZE + 4)  # newest kept
+def test_reply_to_bot_true_when_replying_to_the_bots_own_message():
+    bot_msg = _GMsg("earlier", entities=[])
+    bot_msg.from_user = _User(999)
+    m = _GMsg("fr fr", reply_to_message=bot_msg)
+    assert bot.reply_to_bot(m, 999) is True
+
+
+def test_reply_to_bot_false_for_a_reply_to_someone_else():
+    other_msg = _GMsg("earlier", entities=[])
+    other_msg.from_user = _User(123)
+    m = _GMsg("fr fr", reply_to_message=other_msg)
+    assert bot.reply_to_bot(m, 999) is False
+
+
+def test_reply_to_bot_false_when_not_a_reply():
+    m = _GMsg("fr fr")
+    assert bot.reply_to_bot(m, 999) is False
 
 
 # --- single-instance guard + error handler --------------------------------
