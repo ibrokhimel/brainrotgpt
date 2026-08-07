@@ -127,22 +127,28 @@ async def send(bot, chat_id: int, pieces: list[Piece], *, rng, sleeper,
     rest of the burst, and must never raise into the caller.
     """
     delivered: list[str] = []
+    # Two separate things, which used to be conflated in one flag:
+    #   `first`     — nothing has LANDED yet, so the reply-quote is still owed.
+    #   `attempted` — something has been SENT at, so the next piece is paced.
+    # A failed send has been attempted but did not land, so it earns the next
+    # piece a think gap (previously it didn't) without spending the reply-quote
+    # on a message the group never saw. A sticker skipped for want of a pack is
+    # neither: it consumes no gap and no quote.
     first = True
+    attempted = False
     for piece in pieces:
-        if not first:
+        if attempted:
             await sleeper(rng.uniform(0.5, 1.6))          # think gap
         reply_kw = {"reply_to_message_id": reply_to} if (first and reply_to) else {}
-        # Advance now, not after a successful send: a swallowed failure used to
-        # leave `first` True, so the next piece got the reply-quote again and
-        # skipped its think gap.
-        first = False
         try:
             if piece.kind == "sticker":
                 file_id = sticker_for(piece.value) if sticker_for else None
                 if not file_id:
                     continue
+                attempted = True
                 await bot.send_sticker(chat_id, file_id, **reply_kw)
             else:
+                attempted = True
                 await bot.send_chat_action(chat_id, "typing")
                 await sleeper(typing_time(piece.value, rng=rng))
                 await bot.send_message(chat_id, piece.value, **reply_kw)
@@ -155,4 +161,5 @@ async def send(bot, chat_id: int, pieces: list[Piece], *, rng, sleeper,
         except Exception as e:  # noqa: BLE001 — one bad send shouldn't kill the burst
             logger.warning("burst send failed in chat %s: %s", chat_id, e)
             continue
+        first = False
     return delivered

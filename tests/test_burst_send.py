@@ -121,3 +121,62 @@ def test_send_propagates_forbidden_so_the_caller_can_mute():
     with pytest.raises(Forbidden):
         _run(burst.send(bot, 1, [burst.Piece("text", "yo")],
                         rng=random.Random(0), sleeper=sleep))
+
+
+# --- pacing and the reply-quote after a failed send -------------------------
+
+def test_a_failed_send_paces_the_next_piece_but_keeps_the_reply_quote():
+    """A failed send has been attempted but did not land. It should earn the
+    next piece a think gap -- it used to skip it -- without spending the
+    reply-quote on a message the group never saw."""
+    gaps = []
+
+    async def sleeper(s):
+        gaps.append(s)
+
+    class _Bot:
+        def __init__(self):
+            self.calls = []
+            self.n = 0
+
+        async def send_chat_action(self, chat_id, action):
+            pass
+
+        async def send_message(self, chat_id, text, **kw):
+            self.n += 1
+            if self.n == 1:
+                raise RuntimeError("first send blew up")
+            self.calls.append((text, kw.get("reply_to_message_id")))
+
+    b = _Bot()
+    pieces = [burst.Piece("text", "one"), burst.Piece("text", "two")]
+    out = asyncio.run(burst.send(b, 1, pieces, rng=random.Random(7), sleeper=sleeper,
+                                 reply_to=55))
+
+    assert out == ["two"]
+    assert b.calls == [("two", 55)], "the reply-quote moved to the message that landed"
+    assert len(gaps) > 2, "the second piece still got its think gap"
+
+
+def test_a_sticker_skipped_for_want_of_a_pack_consumes_no_gap_and_no_quote():
+    gaps = []
+
+    async def sleeper(s):
+        gaps.append(s)
+
+    class _Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def send_chat_action(self, chat_id, action):
+            pass
+
+        async def send_message(self, chat_id, text, **kw):
+            self.calls.append((text, kw.get("reply_to_message_id")))
+
+    b = _Bot()
+    pieces = [burst.Piece("sticker", "skull"), burst.Piece("text", "one")]
+    asyncio.run(burst.send(b, 1, pieces, rng=random.Random(7), sleeper=sleeper,
+                           sticker_for=lambda e: None, reply_to=55))
+
+    assert b.calls == [("one", 55)]
