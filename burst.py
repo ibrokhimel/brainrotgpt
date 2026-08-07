@@ -6,6 +6,7 @@ sentence/newline fallback is mandatory — without it one reply in twenty arrive
 as a single wall of text, which is exactly the tell this whole design exists to
 avoid.
 """
+import logging
 import re
 from dataclasses import dataclass
 
@@ -72,3 +73,76 @@ def parse(raw: str, *, max_msgs: int = 5, max_chars: int = 180) -> list[Piece]:
             if chunk:
                 pieces.append(Piece("text", chunk))
     return pieces[:max_msgs]
+
+
+logger = logging.getLogger("brainrotgpt.burst")
+
+CHARS_PER_SEC = 14.0     # a fast thumb-typer
+MAX_TYPING_S = 6.0
+TYPO_CHANCE = 0.05
+CORRECTION_CHANCE = 0.6
+
+
+def typing_time(text: str, *, rng) -> float:
+    return min(len(text) / CHARS_PER_SEC + rng.uniform(0.2, 0.8), MAX_TYPING_S)
+
+
+def _typo(word: str, *, rng) -> str:
+    if len(word) < 4:
+        return word
+    i = rng.randrange(len(word) - 1)
+    return word[:i] + word[i + 1] + word[i] + word[i + 2:]
+
+
+def apply_typos(pieces: list[Piece], *, rng) -> list[Piece]:
+    """Occasionally fumble a word, sometimes followed by a `*correction`."""
+    out: list[Piece] = []
+    for p in pieces:
+        if p.kind != "text" or rng.random() >= TYPO_CHANCE:
+            out.append(p)
+            continue
+        words = p.value.split()
+        if not words:
+            out.append(p)
+            continue
+        i = rng.randrange(len(words))
+        original, fumbled = words[i], _typo(words[i], rng=rng)
+        if fumbled == original:
+            out.append(p)
+            continue
+        words[i] = fumbled
+        out.append(Piece("text", " ".join(words)))
+        if rng.random() < CORRECTION_CHANCE:
+            out.append(Piece("text", f"*{original}"))
+    return out
+
+
+async def send(bot, chat_id: int, pieces: list[Piece], *, rng, sleeper,
+               sticker_for=None, reply_to: int | None = None) -> list[str]:
+    """Send a burst at human pace. Returns the texts actually delivered.
+
+    Every send is individually guarded: one failed message must not abort the
+    rest of the burst, and must never raise into the caller.
+    """
+    delivered: list[str] = []
+    first = True
+    for piece in pieces:
+        if not first:
+            await sleeper(rng.uniform(0.5, 1.6))          # think gap
+        reply_kw = {"reply_to_message_id": reply_to} if (first and reply_to) else {}
+        try:
+            if piece.kind == "sticker":
+                file_id = sticker_for(piece.value) if sticker_for else None
+                if not file_id:
+                    continue
+                await bot.send_sticker(chat_id, file_id, **reply_kw)
+            else:
+                await bot.send_chat_action(chat_id, "typing")
+                await sleeper(typing_time(piece.value, rng=rng))
+                await bot.send_message(chat_id, piece.value, **reply_kw)
+                delivered.append(piece.value)
+        except Exception as e:  # noqa: BLE001 — one bad send shouldn't kill the burst
+            logger.warning("burst send failed in chat %s: %s", chat_id, e)
+            continue
+        first = False
+    return delivered
