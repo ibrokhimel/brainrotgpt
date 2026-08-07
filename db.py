@@ -97,12 +97,50 @@ def init_db(path: str | None = None) -> None:
                 created REAL
             );
             CREATE INDEX IF NOT EXISTS idx_trends_active ON trends(banned, created);
+            CREATE TABLE IF NOT EXISTS messages (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                role    TEXT    NOT NULL,
+                text    TEXT    NOT NULL,
+                ts      REAL    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, ts);
+            CREATE TABLE IF NOT EXISTS chat_state (
+                chat_id          INTEGER PRIMARY KEY,
+                mood             TEXT    NOT NULL DEFAULT 'skibidi',
+                mood_set_at      REAL,
+                bond             INTEGER NOT NULL DEFAULT 0,
+                notes            TEXT    NOT NULL DEFAULT '',
+                msgs_since_notes INTEGER NOT NULL DEFAULT 0,
+                ping_stage       INTEGER NOT NULL DEFAULT 0,
+                next_action_at   REAL,
+                next_action_kind TEXT,
+                last_user_ts     REAL,
+                last_kid_ts      REAL,
+                pings_today      INTEGER NOT NULL DEFAULT 0,
+                pings_day        TEXT,
+                gave_up          INTEGER NOT NULL DEFAULT 0,
+                salty            INTEGER NOT NULL DEFAULT 0,
+                chattiness       TEXT    NOT NULL DEFAULT 'normal',
+                muted            INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_state_due ON chat_state(next_action_at);
+            CREATE TABLE IF NOT EXISTS kid_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         # Migrate older DBs that predate the standalone `length` setting.
         cols = {r[1] for r in _conn.execute("PRAGMA table_info(settings)").fetchall()}
         if "length" not in cols:
             _conn.execute("ALTER TABLE settings ADD COLUMN length TEXT")
+        # Migrate older DBs that predate meme blurbs on trends.
+        tcols = {r[1] for r in _conn.execute("PRAGMA table_info(trends)").fetchall()}
+        if "blurb" not in tcols:
+            _conn.execute("ALTER TABLE trends ADD COLUMN blurb TEXT NOT NULL DEFAULT ''")
+        if "kind" not in tcols:
+            _conn.execute("ALTER TABLE trends ADD COLUMN kind TEXT NOT NULL DEFAULT 'term'")
         _conn.commit()
 
 
@@ -312,7 +350,7 @@ def get_subscription(chat_id: int) -> dict | None:
 
 # --- Trends (live brainrot vocab, manual + auto-fetched) ------------------
 
-def add_trend(term: str, source: str = "manual") -> bool:
+def add_trend(term: str, source: str = "manual", blurb: str = "", kind: str = "term") -> bool:
     """Insert a trend term. A manual add un-bans a previously banned term;
     an auto add of a banned/existing term is skipped. Returns True if it landed."""
     term = (term or "").strip()
@@ -329,8 +367,8 @@ def add_trend(term: str, source: str = "manual") -> bool:
                 return True
             return False  # already present, or banned and only an auto add
         _db().execute(
-            "INSERT INTO trends (term, source, banned, created) VALUES (?,?,0,?)",
-            (term, source, time.time()),
+            "INSERT INTO trends (term, source, banned, created, blurb, kind) VALUES (?,?,0,?,?,?)",
+            (term, source, time.time(), blurb, kind),
         )
         _db().commit()
     return True
@@ -403,3 +441,114 @@ def trend_terms_for_generation(limit: int = 20) -> list[str]:
         return [r["term"] for r in rows]
     except Exception:  # noqa: BLE001 — never let trend lookup break generation
         return []
+
+
+def trend_memes_for_generation(limit: int = 5) -> list[dict]:
+    """Active memes that have an explanation — what the kid can actually talk about."""
+    with _lock:
+        rows = _db().execute(
+            "SELECT term, blurb FROM trends WHERE banned=0 AND kind='meme' "
+            "AND blurb != '' ORDER BY created DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Messages (the kid's conversation memory) -----------------------------
+
+def add_message(chat_id: int, role: str, text: str) -> None:
+    if role not in ("user", "kid"):
+        raise ValueError(f"bad role: {role}")
+    with _lock:
+        _db().execute(
+            "INSERT INTO messages (chat_id, role, text, ts) VALUES (?,?,?,?)",
+            (chat_id, role, text, time.time()),
+        )
+        _db().commit()
+
+
+def recent_messages(chat_id: int, limit: int = 20) -> list[dict]:
+    """The newest `limit` messages, returned oldest-first for prompt assembly."""
+    with _lock:
+        rows = _db().execute(
+            "SELECT role, text, ts FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def prune_messages(chat_id: int, keep: int = 100) -> int:
+    with _lock:
+        cur = _db().execute(
+            "DELETE FROM messages WHERE chat_id=? AND id NOT IN "
+            "(SELECT id FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?)",
+            (chat_id, chat_id, keep),
+        )
+        _db().commit()
+        return cur.rowcount
+
+
+# --- Chat state (per-chat relationship + scheduling) ----------------------
+
+CHATTINESS = ("chill", "normal", "clingy")
+
+CHAT_STATE_FIELDS = (
+    "mood", "mood_set_at", "bond", "notes", "msgs_since_notes", "ping_stage",
+    "next_action_at", "next_action_kind", "last_user_ts", "last_kid_ts",
+    "pings_today", "pings_day", "gave_up", "salty", "chattiness", "muted",
+)
+
+
+def get_chat_state(chat_id: int) -> dict:
+    """Return the chat's state row, creating it with defaults on first access."""
+    with _lock:
+        _db().execute("INSERT OR IGNORE INTO chat_state (chat_id) VALUES (?)", (chat_id,))
+        _db().commit()
+        row = _db().execute("SELECT * FROM chat_state WHERE chat_id=?", (chat_id,)).fetchone()
+    return dict(row)
+
+
+def update_chat_state(chat_id: int, **fields) -> dict:
+    bad = set(fields) - set(CHAT_STATE_FIELDS)
+    if bad:
+        raise ValueError(f"unknown chat_state column(s): {sorted(bad)}")
+    if not fields:
+        return get_chat_state(chat_id)
+    get_chat_state(chat_id)  # ensure the row exists
+    assigns = ", ".join(f"{k}=?" for k in fields)
+    with _lock:
+        _db().execute(
+            f"UPDATE chat_state SET {assigns} WHERE chat_id=?",
+            (*fields.values(), chat_id),
+        )
+        _db().commit()
+    return get_chat_state(chat_id)
+
+
+def due_chats(now: float) -> list[dict]:
+    """Chats with a scheduled action that is due. Muted and gave-up chats never fire."""
+    with _lock:
+        rows = _db().execute(
+            "SELECT * FROM chat_state WHERE next_action_at IS NOT NULL "
+            "AND next_action_at <= ? AND muted=0 AND gave_up=0 ORDER BY next_action_at",
+            (now,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Kid state (global singletons: daily life, budget counters) -----------
+
+def get_kid_state(key: str, default: str = "") -> str:
+    with _lock:
+        row = _db().execute("SELECT value FROM kid_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_kid_state(key: str, value: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT INTO kid_state (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+        _db().commit()
