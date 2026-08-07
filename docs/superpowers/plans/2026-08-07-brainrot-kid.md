@@ -1535,6 +1535,7 @@ git commit -m "feat(life): shared daily life state and school-hours awareness"
   - `stickers.pick_random(chat_id: int, *, rng) -> str | None`
   - `stickers.enabled() -> bool`
   - `config.STICKER_PACK_NAME` (default `""`), `config.STICKER_RANDOM_CHANCE` (default 0.07)
+  - Sticker-only replies need no knob: they emerge when the model returns a lone `[sticker:X]`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1652,7 +1653,6 @@ In `config.py`, after the kid's-day block from Task 7:
 # Telegram makes them available to the kid without a redeploy.
 STICKER_PACK_NAME = os.getenv("STICKER_PACK_NAME", "").strip()
 STICKER_RANDOM_CHANCE = _float("STICKER_RANDOM_CHANCE", 0.07)
-STICKER_ONLY_CHANCE = _float("STICKER_ONLY_CHANCE", 0.15)
 ```
 
 - [ ] **Step 4: Implement `stickers.py`**
@@ -3222,7 +3222,6 @@ Add to `.env.example`, each with a comment:
 # Re-read daily, so adding stickers in Telegram needs no redeploy.
 STICKER_PACK_NAME=
 STICKER_RANDOM_CHANCE=0.07
-STICKER_ONLY_CHANCE=0.15
 
 # Proactive behaviour. GHOST_ENABLED=false stops it ever chasing you.
 GHOST_ENABLED=true
@@ -3317,4 +3316,4 @@ git commit -m "docs: README, .env.example and wishlist for v3 the kid"
 
 - **`budget.py` is a new module.** The spec requires the outbound budget (§12) but assigns it no home; `db.py` is the wrong place for policy.
 - **The `send-then-delete` texture (§4, ~3%) is not implemented.** It is the one behaviour that cannot be verified without a live Telegram client, and a deleted message is indistinguishable from a bug in the logs. Everything else in §4 ships. Add it later behind a config flag if you want it.
-- **`STICKER_ONLY_CHANCE` is configured but unused** — sticker-only replies emerge naturally from the model returning a lone `[sticker:X]`. The knob is reserved so the behaviour can be forced later without a migration.
+- **Sticker-only replies have no config knob.** The spec (§8) wants them ~15% of sticker sends; they emerge naturally when the model returns a lone `[sticker:X]`, which the prompt permits. Adding a knob nothing reads would be dead config.
