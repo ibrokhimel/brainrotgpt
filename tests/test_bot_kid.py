@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import bot
 import burst
@@ -121,10 +122,19 @@ def test_pings_remaining_is_zero_at_the_cap(tmp_path):
 # --- reactions instead of replies -------------------------------------------
 
 def test_low_content_message_can_earn_only_a_reaction_and_arms_no_ghost_ping(tmp_path, monkeypatch):
+    """A reaction-only reply must DISARM the ping the scheduler already armed.
+
+    The ping is armed here on purpose. Asserting `next_action_at is None` on a
+    fresh chat proves nothing — it is already None before the handler runs, so
+    the assertion passes even if the handler does nothing at all.
+    """
     _fresh(tmp_path)
     monkeypatch.setattr(bot._rng, "random", lambda: 0.0)     # force the reaction branch
     monkeypatch.setattr(bot._rng, "choice", lambda seq: seq[0])
     chat_id, user_id = 501, 5010
+    # Mid-ladder: scheduler._do_reply armed a stage-2 ping ten minutes out.
+    db.update_chat_state(chat_id, next_action_at=time.time() + 600,
+                         next_action_kind="ping", ping_stage=2)
     msg = _FakeMessage(text="lol", from_user=_FakeUser(user_id))
     update = _FakeUpdate(msg, chat_id)
     _run(bot.on_user_message(update, _FakeContext()))
@@ -133,6 +143,23 @@ def test_low_content_message_can_earn_only_a_reaction_and_arms_no_ghost_ping(tmp
     state = db.get_chat_state(chat_id)
     assert state["next_action_at"] is None          # nothing chases them
     assert state["next_action_kind"] is None
+    assert state["ping_stage"] == 0                 # the ladder is reset, not paused
+
+
+def test_reaction_only_reply_revives_a_gave_up_chat(tmp_path, monkeypatch):
+    """The reaction path is still a message from a real person, so spec §6's
+    revival applies to it exactly as it does to the main path."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 0.0)
+    monkeypatch.setattr(bot._rng, "choice", lambda seq: seq[0])
+    chat_id = 503
+    db.update_chat_state(chat_id, gave_up=1, ping_stage=5)
+    msg = _FakeMessage(text="lol", from_user=_FakeUser(5030))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    state = db.get_chat_state(chat_id)
+    assert state["gave_up"] == 0
+    assert state["salty"] == 1
 
 
 def test_reaction_chance_miss_falls_through_to_a_scheduled_reply(tmp_path, monkeypatch):
@@ -147,6 +174,50 @@ def test_reaction_chance_miss_falls_through_to_a_scheduled_reply(tmp_path, monke
     state = db.get_chat_state(chat_id)
     assert state["next_action_at"] is not None
     assert state["next_action_kind"] == "reply"
+
+
+# --- revival: coming back after the kid gave up -----------------------------
+
+def test_returning_user_is_not_penalised_again_for_coming_back(tmp_path, monkeypatch):
+    """The −25 give-up hit is charged once, by _do_ping, at give-up.
+
+    Charging it a second time on return charges the user for returning, and
+    because it was applied after apply_bond's clamp it wrote through the −100
+    floor as well.
+    """
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 1.0)     # skip the reaction branch
+    chat_id = 504
+    db.update_chat_state(chat_id, gave_up=1, bond=-100, ping_stage=5)
+    msg = _FakeMessage(text="hey sorry i was busy all week", from_user=_FakeUser(5040))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    state = db.get_chat_state(chat_id)
+    assert state["bond"] >= -100          # never written below the floor
+    assert state["bond"] == -99           # +1 for the message, and nothing else
+    assert state["gave_up"] == 0
+    assert state["salty"] == 1
+
+
+def test_returning_user_gets_the_slow_salty_reply_delay(tmp_path, monkeypatch):
+    """The turn a user returns on is the one the design wants slowed to x2.5.
+    Passing the *old* salty (still 0 at that point) gave them a fast warm one."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 1.0)
+    seen = {}
+
+    def spy(now, *, engaged, bond, salty, rng):
+        seen.update(engaged=engaged, bond=bond, salty=salty)
+        return now + 60
+
+    monkeypatch.setattr(bot.ghost, "schedule_reply_at", spy)
+    chat_id = 505
+    db.update_chat_state(chat_id, gave_up=1, bond=-100)
+    msg = _FakeMessage(text="hey", from_user=_FakeUser(5050))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    assert seen["salty"] is True          # the freshly computed salty, not state["salty"]
+    assert seen["bond"] == -99            # the new bond, not the pre-update one
 
 
 # --- /shutup and /yo --------------------------------------------------------
@@ -270,27 +341,33 @@ def test_reply_to_bot_in_group_also_summons_a_reply(tmp_path, monkeypatch):
 
 # --- photo intake: same scheduling path as text -----------------------------
 
-def test_photo_schedules_a_reply_like_a_text_message(tmp_path, monkeypatch):
-    _fresh(tmp_path)
+class _TgFile:
+    async def download_as_bytearray(self):
+        return bytearray(b"fake-image-bytes")
 
+
+class _PhotoBot(_FakeBotObj):
+    async def get_file(self, file_id):
+        return _TgFile()
+
+
+def _photo_msg(user_id):
+    photo = type("Photo", (), {"file_id": "abc123"})()
+    return _FakeMessage(from_user=_FakeUser(user_id), photo=[photo])
+
+
+def _stub_vision(monkeypatch):
     async def fake_transcribe(image_bytes):
         return "a screenshot of a group chat arguing about pineapple pizza"
 
     monkeypatch.setattr(bot.vision, "transcribe_image", fake_transcribe)
 
-    class _TgFile:
-        async def download_as_bytearray(self):
-            return bytearray(b"fake-image-bytes")
 
-    class _PhotoBot(_FakeBotObj):
-        async def get_file(self, file_id):
-            return _TgFile()
-
+def test_photo_schedules_a_reply_like_a_text_message(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    _stub_vision(monkeypatch)
     chat_id = 801
-    photo = type("Photo", (), {"file_id": "abc123"})()
-    msg = _FakeMessage(from_user=_FakeUser(8010), photo=[photo])
-    update = _FakeUpdate(msg, chat_id)
-    _run(bot.on_photo(update, _FakeContext(_PhotoBot())))
+    _run(bot.on_photo(_FakeUpdate(_photo_msg(8010), chat_id), _FakeContext(_PhotoBot())))
 
     rows = db.recent_messages(chat_id)
     assert len(rows) == 1
@@ -298,4 +375,48 @@ def test_photo_schedules_a_reply_like_a_text_message(tmp_path, monkeypatch):
     state = db.get_chat_state(chat_id)
     assert state["next_action_at"] is not None
     assert state["next_action_kind"] == "reply"
+
+
+def test_photo_from_a_gave_up_chat_is_actually_deliverable(tmp_path, monkeypatch):
+    """A photo must revive a given-up chat, not deadlock it.
+
+    `gave_up=1` is armed here on purpose: it is 0 on a fresh chat, so asserting
+    it is 0 afterwards proves nothing. The real assertion is `due_chats` — the
+    scheduler's query excludes `gave_up=1`, so a reply scheduled without
+    clearing it can never fire, and `coldopen_candidates` requires
+    `next_action_at IS NULL`, so the chat is stuck in both directions forever.
+    """
+    _fresh(tmp_path)
+    _stub_vision(monkeypatch)
+    chat_id = 802
+    db.update_chat_state(chat_id, gave_up=1, ping_stage=5)
+    _run(bot.on_photo(_FakeUpdate(_photo_msg(8020), chat_id), _FakeContext(_PhotoBot())))
+
+    state = db.get_chat_state(chat_id)
+    assert state["gave_up"] == 0
+    assert state["salty"] == 1        # they're back — one wounded reply is owed
+    assert state["ping_stage"] == 0
+    due = [row["chat_id"] for row in db.due_chats(state["next_action_at"])]
+    assert chat_id in due             # the scheduler can actually see it
+
+
+def test_photo_does_not_narrate_that_it_is_looking(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    _stub_vision(monkeypatch)
+    msg = _photo_msg(8030)
+    _run(bot.on_photo(_FakeUpdate(msg, 803), _FakeContext(_PhotoBot())))
     assert msg.replies == []          # no "reading the screenshot" status message
+
+
+def test_photo_is_rate_limited_like_a_text_message(tmp_path, monkeypatch):
+    """A photo costs a multimodal Groq call. Without the limiter one user
+    holding down send on an album drains the quota for every chat."""
+    _fresh(tmp_path)
+    _stub_vision(monkeypatch)
+    calls = []
+    monkeypatch.setattr(bot.limiter, "check", lambda uid: (calls.append(uid), (False, "slow down"))[1])
+    _run(bot.on_photo(_FakeUpdate(_photo_msg(8040), 804), _FakeContext(_PhotoBot())))
+
+    assert calls == [8040]                       # the limiter was consulted
+    assert db.recent_messages(804) == []         # and the refusal was honoured
+    assert db.get_chat_state(804)["next_action_at"] is None

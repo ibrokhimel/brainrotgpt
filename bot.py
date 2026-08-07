@@ -127,6 +127,42 @@ def is_low_content(text: str) -> bool:
     return len(stripped) <= 4 or stripped in LOW_CONTENT
 
 
+def intake_fields(state: dict, now: float, *, bond: int, engaged: bool,
+                  schedule: bool = True) -> dict:
+    """The chat_state changes that every message from a real person makes.
+
+    One place, because the three intake paths (text, reaction-only, photo) had
+    each grown a private copy and drifted apart. The reaction path forgot to
+    disarm the ghost ping the *scheduler* had armed, so a user who replies "lol"
+    got pinged as if they'd ghosted; the photo path forgot to clear `gave_up`,
+    which left the chat invisible to both `due_chats` and `coldopen_candidates`
+    — unreachable in either direction, permanently.
+
+    Spec §6: any message from you resets `ping_stage` and clears the pending
+    action. `schedule=False` means "clear it and arm nothing" — the reaction
+    path, where the reaction *is* the reply.
+
+    Note `bond` is passed in already clamped by `apply_bond`. The give-up
+    penalty is NOT re-applied here: `scheduler._do_ping` charges it once, at
+    give-up. Charging it again would be charging the user for coming back.
+    """
+    # Sticky: an undelivered wounded reply stays owed, so the slow salty delay
+    # still applies even if `gave_up` was already cleared by an earlier message.
+    salty = bool(state["gave_up"]) or bool(state["salty"])
+    fields = {
+        "bond": bond,
+        "ping_stage": 0,
+        "last_user_ts": now,
+        "msgs_since_notes": int(state["msgs_since_notes"] or 0) + 1,
+        "next_action_kind": "reply" if schedule else None,
+        "next_action_at": ghost.schedule_reply_at(
+            now, engaged=engaged, bond=bond, salty=salty, rng=_rng) if schedule else None,
+    }
+    if salty:
+        fields.update(gave_up=0, salty=1)
+    return fields
+
+
 async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A real person texted. Record it, reset the ghost ladder, schedule a reply."""
     msg = update.message
@@ -155,32 +191,22 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.add_message(chat_id, "user", text)
     limiter.record(user_id)
 
-    # A low-content message sometimes earns just a reaction — and crucially arms
-    # no ghost ping, because there is nothing to chase.
+    # A low-content message sometimes earns just a reaction — and arms no ghost
+    # ping, because there is nothing to chase. It must still DISARM any ping the
+    # scheduler already armed: the reaction is the kid answering, not ignoring.
     if is_low_content(text) and _rng.random() < REACTION_CHANCE:
         try:
             await msg.set_reaction(_rng.choice(["💀", "🔥", "👀", "😭", "🗿"]))
         except Exception as e:  # noqa: BLE001 — reactions are cosmetic
             logger.debug("reaction failed: %s", e)
         else:
-            db.update_chat_state(chat_id, last_user_ts=now, bond=apply_bond(state, text))
+            db.update_chat_state(chat_id, **intake_fields(
+                state, now, bond=apply_bond(state, text), engaged=True, schedule=False))
             return
 
     engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < 120)
-    salty = bool(state["gave_up"])          # they're back after being given up on
-    fields = {
-        "bond": apply_bond(state, text) + (BOND_GAVE_UP if salty else 0),
-        "ping_stage": 0,
-        "last_user_ts": now,
-        "msgs_since_notes": int(state["msgs_since_notes"] or 0) + 1,
-        "next_action_kind": "reply",
-        "next_action_at": ghost.schedule_reply_at(
-            now, engaged=engaged, bond=int(state["bond"] or 0),
-            salty=bool(state["salty"]), rng=_rng),
-    }
-    if salty:
-        fields.update(gave_up=0, salty=1)
-    db.update_chat_state(chat_id, **fields)
+    db.update_chat_state(chat_id, **intake_fields(
+        state, now, bond=apply_bond(state, text), engaged=engaged))
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,6 +228,12 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = db.get_chat_state(chat_id)
     if state["muted"]:
         return
+    # A photo costs a multimodal call, so it needs the same quota guard a text
+    # message gets — otherwise one user spamming an album drains Groq for every
+    # chat. Silent refusal, like everywhere else.
+    allowed, _ = limiter.check(user_id)
+    if not allowed:
+        return
     try:
         tg_file = await context.bot.get_file(file_id)
         data = await tg_file.download_as_bytearray()
@@ -209,12 +241,18 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:  # noqa: BLE001 — the kid never surfaces an error
         logger.warning("photo intake failed: %s", e)
         return
+    # The transcript is model output describing an untrusted image; screen it
+    # before it becomes conversation history the prompt builder will replay.
+    ok, _ = guard.screen_input(transcript)
+    if not ok:
+        return
+    limiter.record(user_id)
     now = time.time()
     db.add_message(chat_id, "user", f"[they sent a picture. it shows: {transcript}]")
-    db.update_chat_state(chat_id, last_user_ts=now, next_action_kind="reply",
-                         next_action_at=ghost.schedule_reply_at(
-                             now, engaged=True, bond=int(state["bond"] or 0),
-                             salty=False, rng=_rng))
+    # A photo is a message from a person: it revives a given-up chat exactly as
+    # text does. Without this the reply is scheduled on a row `due_chats` skips.
+    db.update_chat_state(chat_id, **intake_fields(
+        state, now, bond=apply_bond(state, ""), engaged=True))
 
 
 GROUP_MAX_MESSAGES = 2
