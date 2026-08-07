@@ -16,25 +16,6 @@ import config
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
-# Allowed setting values (validated on write so the prompt layer can trust them).
-INTENSITIES = ("mild", "medium", "unhinged")
-LENGTHS = ("short", "medium", "long", "max")
-TONES = ("default", "roast", "cope", "hype", "deny", "gaslight")
-
-# Columns the prompt layer reads back out of the settings row.
-SETTING_KEYS = ("persona", "intensity", "length", "tone", "language", "candidates")
-
-
-def _defaults() -> dict:
-    return {
-        "persona": config.DEFAULT_PERSONA,
-        "intensity": config.DEFAULT_INTENSITY,
-        "length": config.DEFAULT_LENGTH,
-        "tone": config.DEFAULT_TONE,
-        "language": config.DEFAULT_LANGUAGE,
-        "candidates": config.DEFAULT_CANDIDATES,
-    }
-
 
 def init_db(path: str | None = None) -> None:
     """Open the database and create tables. Safe to call once at startup."""
@@ -45,16 +26,6 @@ def init_db(path: str | None = None) -> None:
     with _lock:
         _conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS settings (
-                chat_id    INTEGER PRIMARY KEY,
-                persona    TEXT,
-                intensity  TEXT,
-                length     TEXT,
-                tone       TEXT,
-                language   TEXT,
-                candidates INTEGER,
-                updated    REAL
-            );
             CREATE TABLE IF NOT EXISTS generations (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id  INTEGER,
@@ -110,10 +81,6 @@ def init_db(path: str | None = None) -> None:
             );
             """
         )
-        # Migrate older DBs that predate the standalone `length` setting.
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(settings)").fetchall()}
-        if "length" not in cols:
-            _conn.execute("ALTER TABLE settings ADD COLUMN length TEXT")
         # Migrate older DBs that predate meme blurbs on trends.
         tcols = {r[1] for r in _conn.execute("PRAGMA table_info(trends)").fetchall()}
         if "blurb" not in tcols:
@@ -122,7 +89,7 @@ def init_db(path: str | None = None) -> None:
             _conn.execute("ALTER TABLE trends ADD COLUMN kind TEXT NOT NULL DEFAULT 'term'")
         # One-time cleanup: drop tables from the old generator surface so
         # upgraded installs don't carry dead tables.
-        for dead in ("favorites", "subscriptions", "last_results"):
+        for dead in ("favorites", "subscriptions", "last_results", "settings"):
             _conn.execute(f"DROP TABLE IF EXISTS {dead}")
         _conn.commit()
 
@@ -141,52 +108,6 @@ def _db() -> sqlite3.Connection:
         init_db()
     assert _conn is not None
     return _conn
-
-
-# --- Settings -------------------------------------------------------------
-
-def get_settings(chat_id: int) -> dict:
-    """Return the chat's settings, falling back to configured defaults."""
-    out = _defaults()
-    with _lock:
-        row = _db().execute(
-            "SELECT * FROM settings WHERE chat_id=?", (chat_id,)
-        ).fetchone()
-    if row:
-        for k in SETTING_KEYS:
-            if row[k] is not None:
-                out[k] = row[k]
-    return out
-
-
-def set_setting(chat_id: int, key: str, value) -> dict:
-    """Validate + persist one setting, returning the updated settings dict."""
-    if key == "intensity" and value not in INTENSITIES:
-        raise ValueError(f"bad intensity: {value}")
-    if key == "length" and value not in LENGTHS:
-        raise ValueError(f"bad length: {value}")
-    if key == "tone" and value not in TONES:
-        raise ValueError(f"bad tone: {value}")
-    if key == "candidates":
-        value = max(1, min(int(value), config.MAX_CANDIDATES))
-    current = get_settings(chat_id)
-    current[key] = value
-    with _lock:
-        _db().execute(
-            """INSERT INTO settings
-                 (chat_id, persona, intensity, length, tone, language, candidates, updated)
-               VALUES (?,?,?,?,?,?,?,?)
-               ON CONFLICT(chat_id) DO UPDATE SET
-                 persona=excluded.persona, intensity=excluded.intensity,
-                 length=excluded.length, tone=excluded.tone, language=excluded.language,
-                 candidates=excluded.candidates, updated=excluded.updated""",
-            (
-                chat_id, current["persona"], current["intensity"], current["length"],
-                current["tone"], current["language"], current["candidates"], time.time(),
-            ),
-        )
-        _db().commit()
-    return current
 
 
 # --- Analytics (generations) ---------------------------------------------

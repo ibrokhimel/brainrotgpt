@@ -11,7 +11,6 @@ import logging
 import random
 import socket
 import time
-from collections import deque
 
 from telegram import (
     BotCommand,
@@ -33,6 +32,7 @@ from telegram.ext import (
 )
 
 import brainrot
+import chat_engine
 import config
 import db
 import ghost
@@ -43,7 +43,6 @@ import scheduler
 import stickers
 import trends
 import vision
-from brainrot import PERSONA_BY_KEY, PERSONAS
 from rate_limit import RateLimiter
 from scheduler import BOND_GAVE_UP, BOND_GHOST_STAGE, pings_remaining  # noqa: F401 — re-exported
 
@@ -57,10 +56,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("brainrotgpt")
 
-# In-memory per-chat state (transient input staging + last candidates).
-# chat_id -> {"buffer": [...], "candidates": [...], "cand_idx": int, "ts": float}
-sessions: dict[int, dict] = {}
-
 limiter = RateLimiter(
     cooldown_s=config.RL_COOLDOWN_S,
     per_user_per_min=config.RL_PER_USER_PER_MIN,
@@ -70,22 +65,6 @@ limiter = RateLimiter(
 TG_LIMIT = 4096          # Telegram max message length
 MSG_CAP = 3900           # leave room for footer + buttons in the controls message
 DEBOUNCE_S = 1.5         # wait after the last message before showing the confirm card
-
-INTENSITY_LABELS = {"mild": "🌶 Mild", "medium": "🔥 Medium", "unhinged": "☢️ Unhinged"}
-LENGTH_LABELS = {"short": "💬 Short", "medium": "📄 Medium", "long": "📜 Long", "max": "🧱 Max"}
-TONE_LABELS = {
-    "default": "😐 Default", "roast": "🔥 Roast", "cope": "😤 Cope",
-    "hype": "🚀 Hype", "deny": "🙅 Deny", "gaslight": "🌀 Gaslight",
-}
-# Languages ordered by Telegram's biggest user bases (Uzbek/English/Russian
-# pinned up front), then ranked by country: India, Indonesia, Brazil, Iran,
-# Egypt/Gulf, LatAm, Ukraine, Turkey.
-LANGS = [
-    ("auto", "🌐 Auto"), ("Uzbek", "🇺🇿 Uzbek"), ("English", "🇬🇧 English"),
-    ("Russian", "🇷🇺 Russian"), ("Hindi", "🇮🇳 Hindi"), ("Indonesian", "🇮🇩 Indonesian"),
-    ("Portuguese", "🇧🇷 Portuguese"), ("Persian", "🇮🇷 Persian"), ("Arabic", "🇸🇦 Arabic"),
-    ("Spanish", "🇪🇸 Spanish"), ("Ukrainian", "🇺🇦 Ukrainian"), ("Turkish", "🇹🇷 Turkish"),
-]
 
 WELCOME = (
     "yo welcome to BrainrotGPT 🗿📈\n\n"
@@ -103,9 +82,7 @@ WELCOME = (
 # stats is owner-only, so it's intentionally left out of the public menu.
 BOT_COMMANDS = [
     BotCommand("start", "wake the bot up 🗿"),
-    BotCommand("settings", "style · length · intensity · tone · language 🎭"),
-    BotCommand("persona", "quick style picker 🎭"),
-    BotCommand("clear", "wipe the current convo 🗑"),
+    BotCommand("settings", "mood · chattiness · mute 🎭"),
     BotCommand("shutup", "mute the kid 🤐"),
     BotCommand("yo", "unmute the kid 🗿"),
     BotCommand("help", "how this thing works ❓"),
@@ -121,23 +98,6 @@ HELP = (
     "inline (any chat): @yourbot <paste the text> — inline can only see what you type\n\n"
     "commands: /clear · /help"
 )
-
-
-def get_session(chat_id: int) -> dict:
-    s = sessions.setdefault(chat_id, {"buffer": [], "candidates": [], "cand_idx": 0})
-    s["ts"] = time.time()
-    return s
-
-
-def group_history(chat_id: int) -> deque:
-    """Rolling buffer of recent group messages (lives on the session so it's
-    evicted by the same idle cleanup). Powers @mention auto-context in groups."""
-    s = get_session(chat_id)
-    dq = s.get("history")
-    if dq is None:
-        dq = deque(maxlen=config.GROUP_HISTORY_SIZE)
-        s["history"] = dq
-    return dq
 
 
 def parse_mention(msg, bot_username: str | None, bot_id: int) -> tuple[bool, str]:
@@ -160,62 +120,10 @@ def parse_mention(msg, bot_username: str | None, bot_id: int) -> tuple[bool, str
     return mentioned, leftover.strip()
 
 
-# --- Forward-origin helpers (unchanged) -----------------------------------
-
-def sender_name(msg) -> str:
-    fo = getattr(msg, "forward_origin", None)
-    if fo is not None:
-        su = getattr(fo, "sender_user", None)
-        if su is not None:
-            return su.full_name
-        sun = getattr(fo, "sender_user_name", None)
-        if sun:
-            return sun
-        sc = getattr(fo, "sender_chat", None)
-        if sc is not None:
-            return sc.title or "Chat"
-        ch = getattr(fo, "chat", None)
-        if ch is not None:
-            return ch.title or "Channel"
-    ff = getattr(msg, "forward_from", None)
-    if ff is not None:
-        return ff.full_name
-    fsn = getattr(msg, "forward_sender_name", None)
-    if fsn:
-        return fsn
-    return "Them"
-
-
-def is_forwarded(msg) -> bool:
-    return bool(
-        getattr(msg, "forward_origin", None)
-        or getattr(msg, "forward_from", None)
-        or getattr(msg, "forward_sender_name", None)
-    )
-
-
-def build_transcript(buffer: list[dict]) -> str:
-    lines = []
-    for m in buffer:
-        if m["sender"]:
-            lines.append(f'{m["sender"]}: {m["text"]}')
-        else:
-            lines.append(m["text"])
-    return "\n".join(lines)
-
-
-def build_preview(buffer: list[dict]) -> str:
-    parts = []
-    for m in buffer:
-        t = m["text"].replace("\n", " ")
-        if len(t) > 120:
-            t = t[:117] + "..."
-        prefix = f'{m["sender"]}: ' if m["sender"] else ""
-        parts.append(f"• {prefix}{t}")
-    preview = "\n".join(parts)
-    if len(preview) > 1500:
-        preview = preview[:1500] + "\n…"
-    return preview
+def reply_to_bot(msg, bot_id: int) -> bool:
+    """Was this message a reply to one of the bot's own messages?"""
+    r = getattr(msg, "reply_to_message", None)
+    return bool(r and getattr(r, "from_user", None) and r.from_user.id == bot_id)
 
 
 def split_text(text: str, limit: int = TG_LIMIT) -> list[str]:
@@ -234,75 +142,33 @@ def split_text(text: str, limit: int = TG_LIMIT) -> list[str]:
     return chunks
 
 
-def persona_label_of(key: str) -> str:
-    if key == "random":
-        return "🎲 Random"
-    return PERSONA_BY_KEY[key][1] if key in PERSONA_BY_KEY else key
-
-
 # --- Keyboards ------------------------------------------------------------
+#
+# The user doesn't pick the kid — there's exactly one. /settings only turns
+# the three dials chat_engine.py actually reads off chat_state: mood (reroll
+# now), chattiness, and mute.
 
 def settings_text(chat_id: int) -> str:
-    s = db.get_settings(chat_id)
-    return (
-        "⚙️ settings — tap to change\n\n"
-        f"🎭 style: {persona_label_of(s['persona'])}\n"
-        f"📏 length: {LENGTH_LABELS.get(s['length'], s['length'])}\n"
-        f"🎚 intensity: {INTENSITY_LABELS.get(s['intensity'], s['intensity'])}\n"
-        f"🎯 tone: {TONE_LABELS.get(s['tone'], s['tone'])}\n"
-        f"🌐 language: {s['language']}\n"
-        f"🎲 best-of: {s['candidates']}"
-    )
+    s = db.get_chat_state(chat_id)
+    mood = brainrot.PERSONA_BY_KEY.get(s["mood"], ("", s["mood"], ""))[1]
+    status = "muted 🔇" if s["muted"] else "around 🟢"
+    return (f"{chat_engine.KID_NAME} rn 🗿\n\n"
+            f"mood: {mood}\nchattiness: {s['chattiness']}\nstatus: {status}")
 
 
 def settings_kb(chat_id: int) -> InlineKeyboardMarkup:
-    s = db.get_settings(chat_id)
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(f"🎭 {persona_label_of(s['persona'])}", callback_data="s:p"),
-            InlineKeyboardButton(f"📏 {LENGTH_LABELS.get(s['length'], s['length'])}", callback_data="s:len"),
-        ],
-        [
-            InlineKeyboardButton(INTENSITY_LABELS.get(s["intensity"], s["intensity"]), callback_data="s:i"),
-            InlineKeyboardButton(TONE_LABELS.get(s["tone"], s["tone"]), callback_data="s:t"),
-        ],
-        [
-            InlineKeyboardButton(f"🌐 {s['language']}", callback_data="s:l"),
-            InlineKeyboardButton(f"🎲 Best-of {s['candidates']}", callback_data="s:c"),
-        ],
-        [InlineKeyboardButton("⬅️ Done", callback_data="s:done")],
+    s = db.get_chat_state(chat_id)
+    rows = [[InlineKeyboardButton("🎲 new mood", callback_data="kid:mood")]]
+    rows.append([InlineKeyboardButton("💬 chattiness", callback_data="noop")])
+    rows.append([
+        InlineKeyboardButton(("• " if s["chattiness"] == c else "") + c,
+                             callback_data=f"kid:chat:{c}")
+        for c in db.CHATTINESS
     ])
-
-
-def persona_kb() -> InlineKeyboardMarkup:
-    opts = [("random", "🎲 Random")] + [(k, label) for k, label, _ in PERSONAS]
-    rows, row = [], []
-    for k, label in opts:
-        row.append(InlineKeyboardButton(label, callback_data=f"v:p:{k}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="s:m")])
+    rows.append([InlineKeyboardButton(
+        "🔊 unmute" if s["muted"] else "🔇 mute",
+        callback_data="kid:mute:0" if s["muted"] else "kid:mute:1")])
     return InlineKeyboardMarkup(rows)
-
-
-def _simple_kb(field: str, options: list[tuple[str, str]], columns: int = 2) -> InlineKeyboardMarkup:
-    rows, row = [], []
-    for value, label in options:
-        row.append(InlineKeyboardButton(label, callback_data=f"v:{field}:{value}"))
-        if len(row) == columns:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="s:m")])
-    return InlineKeyboardMarkup(rows)
-
-
-def lang_kb():
-    return _simple_kb("l", [(v, lbl) for v, lbl in LANGS], columns=3)
 
 
 # --- Commands -------------------------------------------------------------
@@ -315,22 +181,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP)
 
 
-async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = get_session(update.effective_chat.id)
-    s["buffer"] = []
-    s["prev_buffer"] = []
-    s["candidates"] = []
-    s["generated"] = False
-    await update.message.reply_text("cleared 🗑️ send a fresh convo whenever 🙏")
-
-
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     await update.message.reply_text(settings_text(cid), reply_markup=settings_kb(cid))
-
-
-async def cmd_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎭 pick a style:", reply_markup=persona_kb())
 
 
 async def cmd_shutup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -503,8 +356,14 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The kid looks at the picture and reacts to it in a burst — same
+    scheduling path as a text message. No status message: a person doesn't
+    narrate that they're looking at your photo."""
     msg = update.message
     chat_id = update.effective_chat.id
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        return
     file_id = None
     if msg.photo:
         file_id = msg.photo[-1].file_id
@@ -512,26 +371,30 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = msg.document.file_id
     if not file_id:
         return
-    status = await msg.reply_text("reading the screenshot 👀📸…")
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
+        return
     try:
         tg_file = await context.bot.get_file(file_id)
         data = await tg_file.download_as_bytearray()
         transcript = await vision.transcribe_image(bytes(data))
-    except vision.VisionError as e:
-        await status.edit_text(f"couldn't read that one 😭 ({e})\ntry pasting the text instead 🙏")
-        return
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — the kid never surfaces an error
         logger.warning("photo intake failed: %s", e)
-        await status.edit_text("couldn't read that image 😭 try pasting the text instead 🙏")
         return
-    session = get_session(chat_id)
-    session["buffer"].append({"sender": None, "text": transcript})
-    await status.edit_text("got the screenshot ✅")
+    now = time.time()
+    db.add_message(chat_id, "user", f"[they sent a picture. it shows: {transcript}]")
+    db.update_chat_state(chat_id, last_user_ts=now, next_action_kind="reply",
+                         next_action_at=ghost.schedule_reply_at(
+                             now, engaged=True, bond=int(state["bond"] or 0),
+                             salty=False, rng=_rng))
+
+
+GROUP_MAX_MESSAGES = 2
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """In groups: buffer recent messages so there's context for a later task to
-    wire up @mention/reply handling against.
+    """In groups: reply only on @mention or a reply to the bot, capped, and
+    never proactive — unprompted messages in a group read as spam.
 
     Needs privacy mode OFF in BotFather (/setprivacy → Disable) to receive
     messages that don't @mention the bot.
@@ -542,71 +405,60 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     me = context.bot
     if msg.from_user and msg.from_user.id == me.id:
         return  # never buffer or react to our own messages
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        return
     chat_id = update.effective_chat.id
-    text = msg.text or msg.caption
-    sender = msg.from_user.full_name if msg.from_user else "Them"
-    group_history(chat_id).append({"sender": sender, "text": text})
+    mentioned, leftover = parse_mention(msg, me.username, me.id)
+    summoned = mentioned or reply_to_bot(msg, me.id)
+    text = leftover if mentioned else (msg.text or msg.caption)
+    if not text:
+        return
+    ok, _ = guard.screen_input(text)
+    if not ok:
+        return
+    db.add_message(chat_id, "user", text)
+    if not summoned:
+        return
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
+        return
+    pieces = (await chat_engine.reply(chat_id, state, rng=_rng))[:GROUP_MAX_MESSAGES]
+    await scheduler.deliver(context.bot, chat_id, pieces, state, reply_to=msg.message_id)
 
 
 # --- Buttons --------------------------------------------------------------
 
 async def handle_settings_cb(query, chat_id, data):
     await query.answer()
-    if data == "s:done":
-        await query.edit_message_text("settings saved ✅ send a convo whenever 🙏")
-        return
-    if data == "s:m":
-        await query.edit_message_text(settings_text(chat_id), reply_markup=settings_kb(chat_id))
-        return
-    if data == "s:p":
-        await query.edit_message_text("🎭 pick a style:", reply_markup=persona_kb())
-        return
-    if data == "s:l":
-        await query.edit_message_text("🌐 pick a language:", reply_markup=lang_kb())
-        return
-    if data.startswith("v:"):
-        _, field, value = data.split(":", 2)
-        keymap = {
-            "p": "persona", "i": "intensity", "len": "length",
-            "t": "tone", "l": "language", "c": "candidates",
-        }
-        key = keymap.get(field)
-        if key:
-            try:
-                db.set_setting(chat_id, key, int(value) if field == "c" else value)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("bad setting %s=%s: %s", key, value, e)
-        await query.edit_message_text(settings_text(chat_id), reply_markup=settings_kb(chat_id))
-        return
+    if data == "kid:mood":
+        mood = _rng.choice(brainrot.PERSONAS)[0]
+        db.update_chat_state(chat_id, mood=mood, mood_set_at=time.time())
+    elif data.startswith("kid:chat:"):
+        value = data.split(":", 2)[2]
+        if value in db.CHATTINESS:
+            db.update_chat_state(chat_id, chattiness=value)
+    elif data.startswith("kid:mute:"):
+        muted = int(data.split(":", 2)[2])
+        fields = {"muted": muted}
+        if muted:
+            fields["next_action_at"] = None
+            fields["next_action_kind"] = None
+        db.update_chat_state(chat_id, **fields)
+    await query.edit_message_text(settings_text(chat_id), reply_markup=settings_kb(chat_id))
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
 
     if data == "noop":
         await query.answer()
         return
 
-    if data.startswith("s:") or data.startswith("v:"):
+    if data.startswith("kid:"):
         await handle_settings_cb(query, chat_id, data)
-        return
-
-    if data == "add":
-        await query.answer()
-        await query.edit_message_text("aight, forward/paste more then hit /done 👍")
-        return
-
-    if data in ("clr", "new"):
-        await query.answer()
-        session["buffer"] = []
-        session["prev_buffer"] = []
-        session["candidates"] = []
-        session["generated"] = False
-        await query.edit_message_text("cleared 🗑️ send a fresh convo whenever 🙏")
-        return
 
 
 # --- Inline mode ----------------------------------------------------------
@@ -669,8 +521,10 @@ async def on_startup(app: Application):
     await stickers.load(app.bot)
 
     app.job_queue.run_repeating(scheduler.tick, interval=60, first=10, name="tick")
+    # No more in-memory intake buffers to evict (bot.py has no `sessions` dict
+    # any more) — this job now exists purely to prune old rows out of `messages`.
     app.job_queue.run_repeating(
-        scheduler.cleanup_sessions, interval=600, first=600, data=sessions)
+        scheduler.cleanup_sessions, interval=600, first=600, data={})
     app.job_queue.run_daily(
         scheduler.life_refresh_job,
         time=datetime.time(hour=config.LIFE_REFRESH_HOUR % 24),
@@ -755,9 +609,7 @@ def main():
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler(["clear", "cancel"], cmd_clear))
     app.add_handler(CommandHandler("settings", cmd_settings))
-    app.add_handler(CommandHandler("persona", cmd_persona))
     app.add_handler(CommandHandler("shutup", cmd_shutup))
     app.add_handler(CommandHandler("yo", cmd_yo))
     app.add_handler(CommandHandler("stats", cmd_stats))

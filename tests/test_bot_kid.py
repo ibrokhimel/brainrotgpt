@@ -1,6 +1,7 @@
 import asyncio
 
 import bot
+import burst
 import db
 
 
@@ -178,3 +179,123 @@ def test_yo_unmutes_and_resets_the_ghost_ladder(tmp_path):
     assert state["gave_up"] == 0
     assert state["ping_stage"] == 0
     assert msg.replies
+
+
+# --- /settings, rebuilt on chat_state ---------------------------------------
+
+def test_settings_keyboard_has_only_the_three_kid_dials(tmp_path):
+    _fresh(tmp_path)
+    kb = bot.settings_kb(1)
+    labels = " ".join(b.text.lower() for row in kb.inline_keyboard for b in row)
+    assert "mood" in labels
+    assert "chatt" in labels
+    for gone in ("intensity", "length", "tone", "best-of"):
+        assert gone not in labels
+
+
+def test_settings_text_reports_chattiness_and_mute(tmp_path):
+    _fresh(tmp_path)
+    db.update_chat_state(1, chattiness="clingy", muted=1)
+    text = bot.settings_text(1).lower()
+    assert "clingy" in text
+    assert "muted" in text
+
+
+# --- group mode: no proactive behaviour -------------------------------------
+
+def test_unmentioned_group_message_is_buffered_but_gets_no_reply(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    calls = []
+    monkeypatch.setattr(bot.scheduler, "deliver", lambda *a, **kw: calls.append((a, kw)))
+    chat_id = 701
+    msg = _FakeMessage(text="just chatting", from_user=_FakeUser(7010, "Alex"))
+    update = _FakeUpdate(msg, chat_id)
+    _run(bot.on_group_message(update, _FakeContext(_FakeBotObj())))
+
+    assert calls == []
+    rows = db.recent_messages(chat_id)
+    assert [r["text"] for r in rows] == ["just chatting"]
+    assert db.get_chat_state(chat_id)["next_action_at"] is None
+
+
+def test_mentioned_group_message_replies_capped_and_arms_no_schedule(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    delivered = {}
+
+    async def fake_deliver(bot_obj, chat_id, pieces, state, reply_to=None):
+        delivered["pieces"] = pieces
+        delivered["reply_to"] = reply_to
+
+    async def fake_reply(chat_id, state, *, rng):
+        return [burst.Piece("text", "a"), burst.Piece("text", "b"), burst.Piece("text", "c")]
+
+    monkeypatch.setattr(bot.scheduler, "deliver", fake_deliver)
+    monkeypatch.setattr(bot.chat_engine, "reply", fake_reply)
+
+    fake_bot = _FakeBotObj(uid=999, username="brainrotcbot")
+    chat_id = 702
+    ent = type("Ent", (), {"type": "mention", "offset": 0, "length": len("@brainrotcbot"), "user": None})()
+    msg = _FakeMessage(text="@brainrotcbot roast him", from_user=_FakeUser(7020),
+                       entities=[ent], message_id=55)
+    update = _FakeUpdate(msg, chat_id)
+    _run(bot.on_group_message(update, _FakeContext(fake_bot)))
+
+    assert len(delivered["pieces"]) == bot.GROUP_MAX_MESSAGES
+    assert delivered["reply_to"] == 55
+    assert db.get_chat_state(chat_id)["next_action_at"] is None
+
+
+def test_reply_to_bot_in_group_also_summons_a_reply(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    delivered = {}
+
+    async def fake_deliver(bot_obj, chat_id, pieces, state, reply_to=None):
+        delivered["called"] = True
+
+    async def fake_reply(chat_id, state, *, rng):
+        return [burst.Piece("text", "a")]
+
+    monkeypatch.setattr(bot.scheduler, "deliver", fake_deliver)
+    monkeypatch.setattr(bot.chat_engine, "reply", fake_reply)
+
+    fake_bot = _FakeBotObj(uid=999, username="brainrotcbot")
+    chat_id = 703
+    bot_msg = _FakeMessage(from_user=_FakeUser(999))
+    msg = _FakeMessage(text="fr fr", from_user=_FakeUser(7030), reply_to_message=bot_msg)
+    update = _FakeUpdate(msg, chat_id)
+    _run(bot.on_group_message(update, _FakeContext(fake_bot)))
+
+    assert delivered.get("called") is True
+
+
+# --- photo intake: same scheduling path as text -----------------------------
+
+def test_photo_schedules_a_reply_like_a_text_message(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+
+    async def fake_transcribe(image_bytes):
+        return "a screenshot of a group chat arguing about pineapple pizza"
+
+    monkeypatch.setattr(bot.vision, "transcribe_image", fake_transcribe)
+
+    class _TgFile:
+        async def download_as_bytearray(self):
+            return bytearray(b"fake-image-bytes")
+
+    class _PhotoBot(_FakeBotObj):
+        async def get_file(self, file_id):
+            return _TgFile()
+
+    chat_id = 801
+    photo = type("Photo", (), {"file_id": "abc123"})()
+    msg = _FakeMessage(from_user=_FakeUser(8010), photo=[photo])
+    update = _FakeUpdate(msg, chat_id)
+    _run(bot.on_photo(update, _FakeContext(_PhotoBot())))
+
+    rows = db.recent_messages(chat_id)
+    assert len(rows) == 1
+    assert "pineapple pizza" in rows[0]["text"]
+    state = db.get_chat_state(chat_id)
+    assert state["next_action_at"] is not None
+    assert state["next_action_kind"] == "reply"
+    assert msg.replies == []          # no "reading the screenshot" status message

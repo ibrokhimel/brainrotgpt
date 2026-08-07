@@ -10,38 +10,6 @@ def fresh_db():
     db.close()
 
 
-def test_default_settings():
-    s = db.get_settings(1)
-    assert s["persona"] == "random"
-    assert s["candidates"] == 1
-    assert s["length"] == db.config.DEFAULT_LENGTH
-
-
-def test_length_persists():
-    db.set_setting(1, "length", "max")
-    assert db.get_settings(1)["length"] == "max"
-
-
-def test_bad_length_rejected():
-    with pytest.raises(ValueError):
-        db.set_setting(1, "length", "nope")
-
-
-def test_set_setting_persists():
-    db.set_setting(1, "persona", "gym_sigma")
-    assert db.get_settings(1)["persona"] == "gym_sigma"
-
-
-def test_candidates_clamped():
-    s = db.set_setting(1, "candidates", 999)
-    assert 1 <= s["candidates"] <= db.config.MAX_CANDIDATES
-
-
-def test_bad_intensity_rejected():
-    with pytest.raises(ValueError):
-        db.set_setting(1, "intensity", "nope")
-
-
 def test_analytics_and_leaderboard():
     db.log_generation(1, 10, "gym_sigma", "medium", "default", False, 100)
     db.log_generation(1, 10, "gym_sigma", "medium", "default", True, 50)
