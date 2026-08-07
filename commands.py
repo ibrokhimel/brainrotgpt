@@ -1,0 +1,225 @@
+"""Slash commands, the /settings UI, and the callback handler that services it.
+
+Split out of bot.py purely to keep that file under the project's line cap —
+this module owns nothing bot.py doesn't already delegate to it: the commands
+users type, the settings keyboard they open, and the button taps that drive
+it. Message intake (on_user_message/on_photo/on_group_message) and process
+lifecycle stay in bot.py. Like scheduler.py, this module never imports bot —
+bot.py imports and registers these handlers, not the other way around.
+"""
+import random
+import time
+
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
+
+import brainrot
+import chat_engine
+import db
+import guard
+import trends
+
+WELCOME = (
+    "yo welcome to BrainrotGPT 🗿📈\n\n"
+    "forward me a convo, paste it, or send a screenshot 📸 and i'll cook you a "
+    "single unhinged brainrot reply you can paste straight back 😭🙏\n\n"
+    "how it works:\n"
+    "1️⃣ forward/paste the messages (or a screenshot)\n"
+    "2️⃣ i show what i caught + a ✅ Generate button\n"
+    "3️⃣ tap Generate → receive maximum aura 📈🗿\n\n"
+    "🎭 /settings — style, length, intensity, tone, language, best-of-N\n"
+    "commands: /done · /clear · /settings · /saved · /last · /leaderboard · /daily · /help"
+)
+
+# Commands shown in Telegram's "/" menu (set via set_my_commands on startup).
+# stats is owner-only, so it's intentionally left out of the public menu.
+BOT_COMMANDS = [
+    BotCommand("start", "wake the bot up 🗿"),
+    BotCommand("settings", "mood · chattiness · mute 🎭"),
+    BotCommand("shutup", "mute the kid 🤐"),
+    BotCommand("yo", "unmute the kid 🗿"),
+    BotCommand("help", "how this thing works ❓"),
+]
+
+HELP = (
+    "BrainrotGPT 🗿\n\n"
+    "• forward/paste messages OR send a screenshot — i'll buffer them\n\n"
+    "🎭 /settings — style / length / intensity / tone / language / best-of-N\n"
+    "/persona — quick style picker\n"
+    "in groups: add me + @mention me and i'll cook off the recent chat. turn my "
+    "privacy mode OFF in BotFather so i can read messages 👀\n"
+    "inline (any chat): @yourbot <paste the text> — inline can only see what you type\n\n"
+    "commands: /clear · /help"
+)
+
+_rng = random.Random()
+
+
+# --- Keyboards ------------------------------------------------------------
+#
+# The user doesn't pick the kid — there's exactly one. /settings only turns
+# the three dials chat_engine.py actually reads off chat_state: mood (reroll
+# now), chattiness, and mute.
+
+def settings_text(chat_id: int) -> str:
+    s = db.get_chat_state(chat_id)
+    mood = brainrot.PERSONA_BY_KEY.get(s["mood"], ("", s["mood"], ""))[1]
+    status = "muted 🔇" if s["muted"] else "around 🟢"
+    return (f"{chat_engine.KID_NAME} rn 🗿\n\n"
+            f"mood: {mood}\nchattiness: {s['chattiness']}\nstatus: {status}")
+
+
+def settings_kb(chat_id: int) -> InlineKeyboardMarkup:
+    s = db.get_chat_state(chat_id)
+    rows = [[InlineKeyboardButton("🎲 new mood", callback_data="kid:mood")]]
+    rows.append([InlineKeyboardButton("💬 chattiness", callback_data="noop")])
+    rows.append([
+        InlineKeyboardButton(("• " if s["chattiness"] == c else "") + c,
+                             callback_data=f"kid:chat:{c}")
+        for c in db.CHATTINESS
+    ])
+    rows.append([InlineKeyboardButton(
+        "🔊 unmute" if s["muted"] else "🔇 mute",
+        callback_data="kid:mute:0" if s["muted"] else "kid:mute:1")])
+    return InlineKeyboardMarkup(rows)
+
+
+# --- Commands -------------------------------------------------------------
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(WELCOME)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP)
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    await update.message.reply_text(settings_text(cid), reply_markup=settings_kb(cid))
+
+
+async def cmd_shutup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    db.update_chat_state(chat_id, muted=1, next_action_at=None, next_action_kind=None)
+    await update.message.reply_text("aight bet 🤐")
+
+
+async def cmd_yo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    db.update_chat_state(chat_id, muted=0, gave_up=0, ping_stage=0)
+    await update.message.reply_text("im back 🗿")
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not guard.is_owner(update.effective_user.id):
+        await update.message.reply_text("owner only 🔒")
+        return
+    s = db.stats()
+    await update.message.reply_text(
+        "📈 stats\n\n"
+        f"total generations: {s['total']}\n"
+        f"last 24h: {s['last_24h']}\n"
+        f"unique users: {s['users']}\n"
+        f"regenerates: {s['regens']}"
+    )
+
+
+async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only live-trends curation: /trend [list|add <t>|ban <t>|remove <t>|refresh].
+
+    Trends are mixed into every generated reply, so this is gated to owners.
+    """
+    if not guard.is_owner(update.effective_user.id):
+        await update.message.reply_text("owner only 🔒")
+        return
+    args = context.args or []
+    sub = args[0].lower() if args else "list"
+    rest = " ".join(args[1:]).strip()
+
+    if sub in ("list", "ls"):
+        rows = db.list_trends(limit=40)
+        auto = db.count_trends(source="auto")
+        if not rows:
+            await update.message.reply_text(
+                "no live trends yet 📭\nadd one: /trend add 67 · pull some: /trend refresh"
+            )
+            return
+        lines = [f"🔥 live trends ({len(rows)} shown · {auto} auto) — mixed into replies:\n"]
+        for r in rows:
+            lines.append(f"{'🤖' if r['source'] == 'auto' else '✍️'} {r['term']}")
+        lines.append("\n/trend add <t> · ban <t> · remove <t> · refresh")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if sub == "add":
+        if not rest:
+            await update.message.reply_text("usage: /trend add <term>")
+            return
+        ok = db.add_trend(rest, source="manual")
+        await update.message.reply_text(f"added ✅ {rest}" if ok else f"already live / banned 🤔 {rest}")
+        return
+
+    if sub in ("ban", "block"):
+        if not rest:
+            await update.message.reply_text("usage: /trend ban <term>")
+            return
+        db.ban_trend(rest)
+        await update.message.reply_text(f"banned 🚫 {rest} (hidden + won't auto-readd)")
+        return
+
+    if sub in ("remove", "rm", "del", "delete"):
+        if not rest:
+            await update.message.reply_text("usage: /trend remove <term>")
+            return
+        ok = db.remove_trend(rest)
+        await update.message.reply_text(f"removed 🗑 {rest}" if ok else f"not found 🤷 {rest}")
+        return
+
+    if sub == "refresh":
+        await update.message.reply_text("pulling fresh trends 🔄… (best-effort)")
+        try:
+            n = await trends.refresh()
+        except Exception as e:  # noqa: BLE001
+            await update.message.reply_text(f"refresh failed 😭 ({str(e)[:80]})")
+            return
+        await update.message.reply_text(f"done ✅ +{n} new — see /trend list")
+        return
+
+    await update.message.reply_text(
+        "usage: /trend [list | add <t> | ban <t> | remove <t> | refresh]"
+    )
+
+
+# --- Buttons --------------------------------------------------------------
+
+async def handle_settings_cb(query, chat_id, data):
+    await query.answer()
+    if data == "kid:mood":
+        mood = _rng.choice(brainrot.PERSONAS)[0]
+        db.update_chat_state(chat_id, mood=mood, mood_set_at=time.time())
+    elif data.startswith("kid:chat:"):
+        value = data.split(":", 2)[2]
+        if value in db.CHATTINESS:
+            db.update_chat_state(chat_id, chattiness=value)
+    elif data.startswith("kid:mute:"):
+        muted = int(data.split(":", 2)[2])
+        fields = {"muted": muted}
+        if muted:
+            fields["next_action_at"] = None
+            fields["next_action_kind"] = None
+        db.update_chat_state(chat_id, **fields)
+    await query.edit_message_text(settings_text(chat_id), reply_markup=settings_kb(chat_id))
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    chat_id = update.effective_chat.id
+
+    if data == "noop":
+        await query.answer()
+        return
+
+    if data.startswith("kid:"):
+        await handle_settings_cb(query, chat_id, data)
