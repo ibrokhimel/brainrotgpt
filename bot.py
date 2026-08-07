@@ -139,8 +139,11 @@ def intake_fields(state: dict, now: float, *, bond: int, engaged: bool,
         "last_user_ts": now,
         "msgs_since_notes": int(state["msgs_since_notes"] or 0) + 1,
         "next_action_kind": "reply" if schedule else None,
+        # bot.py reads `life` and hands ghost the answer, so ghost.py stays a
+        # pure function of (state, now, rng) with no DB behind it.
         "next_action_at": ghost.schedule_reply_at(
-            now, engaged=engaged, bond=bond, salty=salty, rng=_rng) if schedule else None,
+            now, engaged=engaged, bond=bond, salty=salty, rng=_rng,
+            in_school=life.in_school_block(now)) if schedule else None,
     }
     if salty:
         fields.update(gave_up=0, salty=1)

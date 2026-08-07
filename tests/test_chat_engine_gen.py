@@ -123,3 +123,20 @@ def test_generate_never_raises_when_the_model_returns_unparseable_output(monkeyp
     out = asyncio.run(chat_engine._generate(
         "sys", "usr", model="m", temperature=0.9, max_tokens=100, max_msgs=3))
     assert out == []
+
+
+def test_school_block_shortens_the_burst():
+    """Spec 4: slower AND shorter. A kid texting under a desk sends fewer
+    messages, they don't stop replying."""
+    rng = random.Random(3)
+    in_class = [chat_engine.burst_target("clingy", rng=rng, in_school=True) for _ in range(200)]
+    rng = random.Random(3)
+    free = [chat_engine.burst_target("clingy", rng=rng, in_school=False) for _ in range(200)]
+    assert max(in_class) < max(free)
+    assert sum(in_class) < sum(free)
+
+
+def test_school_block_never_silences_the_kid():
+    rng = random.Random(3)
+    assert all(chat_engine.burst_target("chill", rng=rng, in_school=True) >= 1
+               for _ in range(200))

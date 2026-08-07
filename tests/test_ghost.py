@@ -1,4 +1,5 @@
 import datetime as dt
+import pathlib
 import random
 
 import ghost
@@ -92,3 +93,41 @@ def test_schedule_reply_at_defers_a_3am_message_to_the_morning():
                                   rng=random.Random(0))
     assert not ghost.is_asleep(out)
     assert dt.datetime.fromtimestamp(out).hour >= 9
+
+
+# --- spec 1/4: the weekday school block ------------------------------------
+
+def test_school_block_slows_the_reply():
+    """Spec 4: on weekdays the school block slows and shortens replies rather
+    than deferring them entirely -- a kid texts in class, just badly."""
+    rng_a, rng_b = random.Random(11), random.Random(11)
+    in_class = ghost.reply_delay(engaged=True, bond=0, salty=False, rng=rng_a, in_school=True)
+    free = ghost.reply_delay(engaged=True, bond=0, salty=False, rng=rng_b, in_school=False)
+    assert in_class > free
+
+
+def test_school_block_composes_with_the_salty_multiplier():
+    """Both slowdowns apply -- school is not a replacement for salty."""
+    rng_a, rng_b = random.Random(11), random.Random(11)
+    both = ghost.reply_delay(engaged=True, bond=0, salty=True, rng=rng_a, in_school=True)
+    salty_only = ghost.reply_delay(engaged=True, bond=0, salty=True, rng=rng_b, in_school=False)
+    assert both > salty_only
+
+
+def test_schedule_reply_at_passes_the_school_block_through():
+    rng_a, rng_b = random.Random(11), random.Random(11)
+    at = _at(12)
+    in_class = ghost.schedule_reply_at(at, engaged=True, bond=0, salty=False,
+                                       rng=rng_a, in_school=True)
+    free = ghost.schedule_reply_at(at, engaged=True, bond=0, salty=False,
+                                   rng=rng_b, in_school=False)
+    assert in_class > free
+
+
+def test_ghost_stays_pure_and_does_not_import_life_or_db():
+    """ghost.py is a pure function of (state, now, rng). Importing life would
+    drag db and a Groq client in behind it and make every timing test need a
+    database -- which is why in_school arrives as a keyword argument instead."""
+    src = pathlib.Path(ghost.__file__).read_text()
+    assert "import life" not in src
+    assert "import db" not in src

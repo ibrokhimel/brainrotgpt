@@ -206,7 +206,7 @@ def test_returning_user_gets_the_slow_salty_reply_delay(tmp_path, monkeypatch):
     monkeypatch.setattr(bot._rng, "random", lambda: 1.0)
     seen = {}
 
-    def spy(now, *, engaged, bond, salty, rng):
+    def spy(now, *, engaged, bond, salty, rng, in_school=False):
         seen.update(engaged=engaged, bond=bond, salty=salty)
         return now + 60
 
@@ -420,3 +420,22 @@ def test_photo_is_rate_limited_like_a_text_message(tmp_path, monkeypatch):
     assert calls == [8040]                       # the limiter was consulted
     assert db.recent_messages(804) == []         # and the refusal was honoured
     assert db.get_chat_state(804)["next_action_at"] is None
+
+
+def test_intake_consults_the_school_block(tmp_path, monkeypatch):
+    """The wiring, not the arithmetic: in_school reaches schedule_reply_at.
+    ghost.py stays pure -- bot.py reads life and passes the answer in."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(bot._rng, "random", lambda: 1.0)     # skip the reaction branch
+    monkeypatch.setattr(bot.life, "in_school_block", lambda ts: True)
+    seen = {}
+
+    def spy(now, *, engaged, bond, salty, rng, in_school=False):
+        seen["in_school"] = in_school
+        return now + 60
+
+    monkeypatch.setattr(bot.ghost, "schedule_reply_at", spy)
+    msg = _FakeMessage(text="what are you up to", from_user=_FakeUser(5060))
+    _run(bot.on_user_message(_FakeUpdate(msg, 506), _FakeContext()))
+
+    assert seen["in_school"] is True

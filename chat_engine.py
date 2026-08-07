@@ -131,9 +131,16 @@ _BURST_WEIGHTS = {
 }
 
 
-def burst_target(chattiness: str, *, rng) -> int:
+# Spec §4: the school block shortens replies too, not just slows them. A kid
+# under a desk sends one or two, not a five-message burst — but never zero,
+# because the point is that they still text, just badly.
+SCHOOL_BURST_CAP = 2
+
+
+def burst_target(chattiness: str, *, rng, in_school: bool = False) -> int:
     weights = _BURST_WEIGHTS.get(chattiness, _BURST_WEIGHTS["normal"])
-    return rng.choices(_BURST_SIZES, weights=weights, k=1)[0]
+    n = rng.choices(_BURST_SIZES, weights=weights, k=1)[0]
+    return min(n, SCHOOL_BURST_CAP) if in_school else n
 
 
 async def _complete(messages, *, model, temperature, max_tokens) -> str:
@@ -182,7 +189,8 @@ async def _generate(system: str, user: str, *, model, temperature, max_tokens,
 
 async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
     """Answer a real user. Deliberately NOT budgeted."""
-    target = burst_target(state.get("chattiness") or "normal", rng=rng)
+    target = burst_target(state.get("chattiness") or "normal", rng=rng,
+                          in_school=life.in_school_block(time.time()))
     system = _context(state, rng=rng, target=target)
     convo = guard.wrap_untrusted(memory.transcript(chat_id))
     user = f"{convo}\n\nReply as {KID_NAME}, {target} message(s), separated by |||."

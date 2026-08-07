@@ -22,6 +22,12 @@ FINAL_STAGE = 5
 # chattiness scales every ghost delay: clingy chases sooner, chill waits longer.
 CHATTINESS_FACTOR = {"chill": 1.8, "normal": 1.0, "clingy": 0.55}
 
+# Spec §4: on weekdays the school block slows replies rather than deferring
+# them — a kid texts in class, just badly. `in_school` arrives as a keyword
+# argument rather than being read here, because importing `life` would drag
+# `db` and a Groq client in behind it and cost this module its purity.
+SCHOOL_DELAY_FACTOR = 2.0
+
 
 def is_asleep(ts: float) -> bool:
     return SLEEP_START_H <= dt.datetime.fromtimestamp(ts).hour < SLEEP_END_H
@@ -50,7 +56,8 @@ def next_ping(stage: int, now: float, *, rng, chattiness: str = "normal") -> tup
     return defer_for_sleep(fire_at, rng=rng), new_stage
 
 
-def reply_delay(*, engaged: bool, bond: int, salty: bool, rng) -> float:
+def reply_delay(*, engaged: bool, bond: int, salty: bool, rng,
+                in_school: bool = False) -> float:
     """How long before the kid answers. Speed is itself a social signal."""
     if rng.random() < 0.05:
         base = rng.uniform(3 * 60, 15 * 60)      # genuinely busy
@@ -58,6 +65,8 @@ def reply_delay(*, engaged: bool, bond: int, salty: bool, rng) -> float:
         base = rng.uniform(2, 10)
     else:
         base = rng.uniform(20, 90)
+    if in_school:
+        base *= SCHOOL_DELAY_FACTOR   # phone under the desk; it composes with the rest
     if salty:
         return base * 2.5
     if bond >= 40:
@@ -67,13 +76,15 @@ def reply_delay(*, engaged: bool, bond: int, salty: bool, rng) -> float:
     return base
 
 
-def schedule_reply_at(now: float, *, engaged: bool, bond: int, salty: bool, rng) -> float:
+def schedule_reply_at(now: float, *, engaged: bool, bond: int, salty: bool, rng,
+                      in_school: bool = False) -> float:
     """Absolute time for the reply, respecting the sleep window.
 
     A 03:00 message is answered after 09:00 — a phone left face-down all night is
     the single clearest signal that there is a person on the other end.
     """
-    at = now + reply_delay(engaged=engaged, bond=bond, salty=salty, rng=rng)
+    at = now + reply_delay(engaged=engaged, bond=bond, salty=salty, rng=rng,
+                           in_school=in_school)
     return defer_for_sleep(at, rng=rng)
 
 
