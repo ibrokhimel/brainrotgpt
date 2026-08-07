@@ -5,6 +5,7 @@ import bot
 import burst
 import db
 import scheduler
+import stickers
 
 
 def _fresh(tmp_path):
@@ -32,7 +33,7 @@ class _FakeChat:
 class _FakeMessage:
     def __init__(self, text=None, caption=None, from_user=None, entities=None,
                 caption_entities=None, reply_to_message=None, message_id=1,
-                photo=None, document=None):
+                photo=None, document=None, sticker=None):
         self.text = text
         self.caption = caption
         self.from_user = from_user
@@ -42,6 +43,7 @@ class _FakeMessage:
         self.message_id = message_id
         self.photo = photo or []
         self.document = document
+        self.sticker = sticker
         self.reactions = []
         self.replies = []
 
@@ -509,3 +511,53 @@ def test_on_photo_ignores_an_edited_message_with_no_message_object(tmp_path):
 
     _run(bot.on_photo(_EditedUpdate(), _FakeContext(_PhotoBot())))   # must not raise
     assert db.get_chat_state(810)["next_action_at"] is None
+
+
+# --- Stickers: /stickers's capture prompt vs. an ordinary sticker ---------
+
+class _StickerBot(_FakeBotObj):
+    def __init__(self, items=None, *a, **kw):
+        super().__init__(*a, **kw)
+        self._items = items if items is not None else [("a", "💀"), ("b", "🗿")]
+        self.requested = None
+
+    async def get_sticker_set(self, name):
+        self.requested = name
+        return type("Set", (), {"stickers": [
+            type("S", (), {"file_id": f, "emoji": e})() for f, e in self._items
+        ]})()
+
+
+def _sticker_msg(user_id, set_name="pack1", emoji="💀"):
+    sticker = type("Sticker", (), {"set_name": set_name, "emoji": emoji, "file_id": "sid1"})()
+    return _FakeMessage(from_user=_FakeUser(user_id), sticker=sticker)
+
+
+def test_sticker_with_no_capture_pending_is_recorded_as_a_message_and_schedules_a_reply(tmp_path):
+    _fresh(tmp_path)
+    stickers.reset()
+    chat_id = 901
+    _run(bot.on_sticker(_FakeUpdate(_sticker_msg(9010), chat_id), _FakeContext(_StickerBot())))
+
+    rows = db.recent_messages(chat_id)
+    assert len(rows) == 1
+    assert "💀" in rows[0]["text"]
+    state = db.get_chat_state(chat_id)
+    assert state["next_action_at"] is not None
+    assert state["next_action_kind"] == "reply"
+
+
+def test_sticker_capture_bypasses_conversation_intake_when_owner_and_pending(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    stickers.reset()
+    monkeypatch.setattr(bot.config, "OWNER_IDS", {9020})
+    stickers.arm_capture()
+    chat_id = 902
+    _run(bot.on_sticker(
+        _FakeUpdate(_sticker_msg(9020, set_name="ownerpack"), chat_id), _FakeContext(_StickerBot())
+    ))
+
+    assert db.recent_messages(chat_id) == []             # not treated as conversation
+    assert db.get_chat_state(chat_id)["next_action_at"] is None
+    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "ownerpack"
+    assert not stickers.capture_pending()

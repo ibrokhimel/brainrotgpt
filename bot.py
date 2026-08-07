@@ -211,6 +211,14 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state, now, bond=apply_bond(state, text), engaged=engaged))
 
 
+def _record_engaged_message(chat_id: int, state: dict, text: str) -> None:
+    """Shared on_photo/on_sticker tail: record, schedule a reply, revive a given-up chat."""
+    now = time.time()
+    db.add_message(chat_id, "user", text)
+    db.update_chat_state(chat_id, **intake_fields(
+        state, now, bond=apply_bond(state, ""), engaged=True))
+
+
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """The kid looks at the picture and reacts to it in a burst — same
     scheduling path as a text message. No status message: a person doesn't
@@ -251,12 +259,25 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ok:
         return
     limiter.record(user_id)
-    now = time.time()
-    db.add_message(chat_id, "user", f"[they sent a picture. it shows: {transcript}]")
-    # A photo is a message from a person: it revives a given-up chat exactly as
-    # text does. Without this the reply is scheduled on a row `due_chats` skips.
-    db.update_chat_state(chat_id, **intake_fields(
-        state, now, bond=apply_bond(state, ""), engaged=True))
+    _record_engaged_message(chat_id, state, f"[they sent a picture. it shows: {transcript}]")
+
+
+async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A sticker: /stickers may be capturing a pack off it — check that first,
+    else it's an ordinary message, same intake path as text/photo."""
+    msg = update.message
+    if msg is None or not msg.sticker:
+        return
+    if await commands.try_capture_sticker(update, context):
+        return
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not guard.is_allowed_user(user_id):
+        return
+    chat_id = update.effective_chat.id
+    state = db.get_chat_state(chat_id)
+    if state["muted"]:
+        return
+    _record_engaged_message(chat_id, state, f"[they sent a sticker: {msg.sticker.emoji or '?'}]")
 
 
 GROUP_MAX_MESSAGES = 2
@@ -453,6 +474,7 @@ def main():
         on_user_message))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE), on_photo))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Sticker.ALL, on_sticker))
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION), on_group_message))
     app.add_error_handler(on_error)

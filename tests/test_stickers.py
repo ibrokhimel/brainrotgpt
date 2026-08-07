@@ -1,5 +1,6 @@
 import asyncio
 import random
+import time
 
 import pytest
 
@@ -132,3 +133,27 @@ def test_load_disabled_when_kid_state_explicitly_off_even_with_a_config_default(
     assert _run(stickers.load(bot)) == 0
     assert not stickers.enabled()
     assert bot.requested is None  # never even asked Telegram
+
+
+# --- Sticker-capture flag: /stickers's "send me a sticker" prompt window ---
+
+def test_capture_is_not_pending_by_default():
+    assert not stickers.capture_pending()
+
+
+def test_arm_capture_makes_it_pending():
+    stickers.arm_capture()
+    assert stickers.capture_pending()
+
+
+def test_disarm_capture_clears_it():
+    stickers.arm_capture()
+    stickers.disarm_capture()
+    assert not stickers.capture_pending()
+
+
+def test_capture_pending_is_false_once_the_window_has_elapsed():
+    # Written directly rather than via arm_capture() + a real sleep, so the
+    # test fails for the right reason if the expiry check is ever removed.
+    db.set_kid_state(stickers.AWAITING_STICKER_KEY, str(time.time() - stickers.CAPTURE_WINDOW_S - 1))
+    assert not stickers.capture_pending()

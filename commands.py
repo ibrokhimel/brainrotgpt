@@ -203,14 +203,20 @@ async def cmd_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
 
     if not args:
+        # Arm the capture window every time — the owner can just send a
+        # sticker from the pack next instead of typing/pasting a name.
+        stickers.arm_capture()
+        prompt = "send me a sticker from the pack and i'll read it 🗿"
         s = stickers.status()
         if not s["pack_name"]:
-            await update.message.reply_text("stickers are off 🚫\nset one: /stickers <pack_name>")
+            await update.message.reply_text(f"stickers are off 🚫\n{prompt}")
             return
         await update.message.reply_text(
-            f"pack: {s['pack_name']}\n{s['count']} sticker(s) · {s['emoji_count']} emoji"
+            f"pack: {s['pack_name']}\n{s['count']} sticker(s) · {s['emoji_count']} emoji\n\n{prompt}"
         )
         return
+
+    stickers.disarm_capture()  # a typed name/off resolves the pending prompt
 
     if args[0].lower() == "off":
         db.set_kid_state(stickers.STICKER_PACK_KEY, "")
@@ -231,6 +237,43 @@ async def cmd_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"couldn't load pack {pack_name} 😭 (bad name, or it's empty) — stickers off for now"
         )
+
+
+async def try_capture_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """If an owner-armed /stickers capture is pending and unexpired, read the
+    pack off this sticker and load it — instead of the sticker being treated
+    as an ordinary message. See stickers.capture_pending() for the window.
+
+    Only a *successful* load disarms the flag. On failure (no set_name, or
+    the pack doesn't load) it stays armed so the owner can just send a
+    different sticker instead of re-typing /stickers — the CAPTURE_WINDOW_S
+    expiry is what bounds it, not a single-attempt limit. Returns whether
+    this sticker was consumed as a capture attempt; bot.on_sticker falls
+    through to ordinary intake when this returns False (not owner, or
+    nothing pending).
+    """
+    msg = update.message
+    user_id = msg.from_user.id if msg.from_user else 0
+    if not (guard.is_owner(user_id) and stickers.capture_pending()):
+        return False
+
+    set_name = msg.sticker.set_name
+    if not set_name:
+        await update.message.reply_text(
+            "that one's not part of a pack i can read 🤷 — still waiting, try another sticker from it"
+        )
+        return True
+
+    db.set_kid_state(stickers.STICKER_PACK_KEY, set_name)
+    count = await stickers.load(context.bot)
+    if count:
+        stickers.disarm_capture()
+        await update.message.reply_text(f"pack set ✅ {set_name} — loaded {count} sticker(s)")
+    else:
+        await update.message.reply_text(
+            f"couldn't load pack {set_name} 😭 (bad name, or it's empty) — still waiting, try another sticker"
+        )
+    return True
 
 
 # --- Buttons --------------------------------------------------------------
