@@ -5,6 +5,7 @@ itself — no manual tagging. The set is re-read daily, which means adding stick
 in Telegram makes them available to the kid with no redeploy.
 """
 import logging
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
@@ -20,6 +21,13 @@ NO_REPEAT_WINDOW = 10   # don't resend the same file_id within this many sends
 # an explicit /stickers off, which disables the feature even if the .env has
 # a default configured.
 STICKER_PACK_KEY = "sticker_pack"
+
+# kid_state key for the /stickers "send me a sticker and i'll read it" prompt.
+# Holds the epoch time it was armed, "" when idle. A bare flag with no expiry
+# would let a /stickers typed and forgotten silently hijack a sticker sent
+# hours later, so a capture only counts within CAPTURE_WINDOW_S of being armed.
+AWAITING_STICKER_KEY = "awaiting_sticker_at"
+CAPTURE_WINDOW_S = 300  # 5 minutes
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,27 @@ def status() -> dict:
         "count": len(_all),
         "emoji_count": len(_by_emoji),
     }
+
+
+def arm_capture() -> None:
+    """Mark that the next sticker from the owner should be read as the pack."""
+    db.set_kid_state(AWAITING_STICKER_KEY, str(time.time()))
+
+
+def disarm_capture() -> None:
+    db.set_kid_state(AWAITING_STICKER_KEY, "")
+
+
+def capture_pending() -> bool:
+    """Whether an armed /stickers capture is still within its window."""
+    raw = db.get_kid_state(AWAITING_STICKER_KEY, default="")
+    if not raw:
+        return False
+    try:
+        armed_at = float(raw)
+    except ValueError:
+        return False
+    return time.time() - armed_at < CAPTURE_WINDOW_S
 
 
 async def load(bot) -> int:

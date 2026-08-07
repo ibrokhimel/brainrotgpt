@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -36,7 +37,9 @@ class _FakeUser:
 
 
 class _FakeMessage:
-    def __init__(self):
+    def __init__(self, from_user=None, sticker=None):
+        self.from_user = from_user
+        self.sticker = sticker
         self.replies = []
 
     async def reply_text(self, text, **kw):
@@ -44,9 +47,16 @@ class _FakeMessage:
 
 
 class _FakeUpdate:
-    def __init__(self, uid):
+    def __init__(self, uid, sticker=None):
         self.effective_user = _FakeUser(uid)
-        self.message = _FakeMessage()
+        self.message = _FakeMessage(from_user=_FakeUser(uid), sticker=sticker)
+
+
+class FakeStickerObj:
+    def __init__(self, set_name="pack1", emoji="💀"):
+        self.set_name = set_name
+        self.emoji = emoji
+        self.file_id = "sid1"
 
 
 class FakeSticker:
@@ -169,3 +179,78 @@ def test_report_when_no_pack_is_configured(monkeypatch):
 
     reply = update.message.replies[0].lower()
     assert "off" in reply
+
+
+def test_no_arg_report_arms_the_capture_and_prompts_for_a_sticker(monkeypatch):
+    _owner_only(monkeypatch)
+    update = _FakeUpdate(OWNER)
+    ctx = _FakeContext(args=[])
+
+    _run(commands.cmd_stickers(update, ctx))
+
+    assert stickers.capture_pending()
+    assert "sticker" in update.message.replies[0].lower()
+
+
+# --- Sticker capture: reading the pack off a sticker the owner sends -------
+
+def test_non_owner_sticker_is_not_captured_even_with_a_pending_flag(monkeypatch):
+    _owner_only(monkeypatch)
+    stickers.arm_capture()
+    update = _FakeUpdate(NOT_OWNER, sticker=FakeStickerObj(set_name="notmine"))
+    ctx = _FakeContext(bot_obj=FakeBot())
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is False
+    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == ""  # unchanged
+    assert ctx.bot.requested is None
+    assert stickers.capture_pending()  # still armed for the real owner
+
+
+def test_capture_stores_the_pack_and_clears_the_flag(monkeypatch):
+    _owner_only(monkeypatch)
+    stickers.arm_capture()
+    update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name="ownerpack"))
+    ctx = _FakeContext(bot_obj=FakeBot([("a", "💀"), ("b", "🗿")]))
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is True
+    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "ownerpack"
+    assert ctx.bot.requested == "ownerpack"
+    assert not stickers.capture_pending()
+    assert stickers.enabled()
+    assert "ownerpack" in update.message.replies[0]
+
+
+def test_an_expired_flag_does_not_capture(monkeypatch):
+    """The one that matters: fails if the expiry check is ever removed, since
+    an unexpired-only capture_pending() would let this sticker through."""
+    _owner_only(monkeypatch)
+    db.set_kid_state(
+        stickers.AWAITING_STICKER_KEY, str(time.time() - stickers.CAPTURE_WINDOW_S - 1)
+    )
+    update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name="ownerpack"))
+    ctx = _FakeContext(bot_obj=FakeBot())
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is False
+    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == ""  # unchanged
+    assert ctx.bot.requested is None  # never even asked Telegram
+
+
+def test_a_sticker_with_no_set_name_is_handled_without_changing_the_current_pack(monkeypatch):
+    _owner_only(monkeypatch)
+    db.set_kid_state(stickers.STICKER_PACK_KEY, "existing")
+    stickers.arm_capture()
+    update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name=None))
+    ctx = _FakeContext(bot_obj=FakeBot())
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is True  # consumed the capture attempt, just not a load
+    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "existing"
+    assert ctx.bot.requested is None
+    assert not stickers.capture_pending()
