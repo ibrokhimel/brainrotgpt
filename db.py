@@ -1,8 +1,8 @@
-"""SQLite persistence: per-chat settings, analytics, trends, and chat memory.
+"""SQLite persistence: per-chat state, analytics, trends, and chat memory.
 
 Everything used to live in process memory and reset on restart. This module
-keeps the durable bits in a small SQLite file. Buffers being built mid-input
-stay in memory by design (they're transient staging) — see bot.sessions.
+keeps the durable bits — chat_state (mood/bond/notes/chattiness/scheduling),
+the message log, trends, and generation analytics — in a small SQLite file.
 
 Calls are synchronous but tiny (local file); a lock keeps them safe across the
 event loop and the job-queue threads.
