@@ -1,8 +1,18 @@
 import asyncio
 import random
 
+import pytest
+
 import config
+import db
 import stickers
+
+
+@pytest.fixture(autouse=True)
+def fresh_db(tmp_path):
+    db.init_db(str(tmp_path / "stickers.db"))
+    yield
+    db.close()
 
 
 class FakeSticker:
@@ -18,8 +28,10 @@ class FakeSet:
 class FakeBot:
     def __init__(self, items, fail=False):
         self._items, self._fail = items, fail
+        self.requested = None
 
     async def get_sticker_set(self, name):
+        self.requested = name
         if self._fail:
             raise RuntimeError("pack not found")
         return FakeSet(self._items)
@@ -91,3 +103,32 @@ def test_empty_pack_name_disables_the_feature():
     config.STICKER_PACK_NAME = ""
     assert _run(stickers.load(FakeBot([("a", "💀")]))) == 0
     assert not stickers.enabled()
+
+
+# --- Resolution order: kid_state override beats the .env default -----------
+
+def test_load_prefers_kid_state_pack_over_config():
+    config.STICKER_PACK_NAME = "envpack"
+    db.set_kid_state(stickers.STICKER_PACK_KEY, "dbpack")
+    stickers.reset()
+    bot = FakeBot([("a", "💀")])
+    assert _run(stickers.load(bot)) == 1
+    assert bot.requested == "dbpack"
+
+
+def test_load_falls_back_to_config_when_kid_state_unset():
+    config.STICKER_PACK_NAME = "envpack"
+    stickers.reset()
+    bot = FakeBot([("a", "💀")])
+    assert _run(stickers.load(bot)) == 1
+    assert bot.requested == "envpack"
+
+
+def test_load_disabled_when_kid_state_explicitly_off_even_with_a_config_default():
+    config.STICKER_PACK_NAME = "envpack"
+    db.set_kid_state(stickers.STICKER_PACK_KEY, "")  # explicit /stickers off
+    stickers.reset()
+    bot = FakeBot([("a", "💀")])
+    assert _run(stickers.load(bot)) == 0
+    assert not stickers.enabled()
+    assert bot.requested is None  # never even asked Telegram

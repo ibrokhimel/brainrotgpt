@@ -9,10 +9,17 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 
 import config
+import db
 
 logger = logging.getLogger("brainrotgpt.stickers")
 
 NO_REPEAT_WINDOW = 10   # don't resend the same file_id within this many sends
+
+# kid_state key the /stickers command persists its override under. Unset means
+# "no override yet" (fall back to config.STICKER_PACK_NAME); set to "" means
+# an explicit /stickers off, which disables the feature even if the .env has
+# a default configured.
+STICKER_PACK_KEY = "sticker_pack"
 
 
 @dataclass(frozen=True)
@@ -41,15 +48,39 @@ def available_emoji() -> list[str]:
     return sorted(_by_emoji)
 
 
+def current_pack_name() -> str | None:
+    """The pack name load() would use next. None means stickers are disabled.
+
+    kid_state["sticker_pack"] overrides config.STICKER_PACK_NAME when the
+    owner has run /stickers. Unset falls back to the .env default; explicitly
+    set to "" (via /stickers off) disables the feature outright, even with a
+    .env default configured.
+    """
+    stored = db.get_kid_state(STICKER_PACK_KEY, default=None)
+    if stored is not None:
+        return stored or None
+    return config.STICKER_PACK_NAME or None
+
+
+def status() -> dict:
+    """Snapshot for the /stickers report: configured pack, and what's loaded."""
+    return {
+        "pack_name": current_pack_name(),
+        "count": len(_all),
+        "emoji_count": len(_by_emoji),
+    }
+
+
 async def load(bot) -> int:
     """Read the configured pack into the cache. Never raises."""
     reset()
-    if not config.STICKER_PACK_NAME:
+    pack_name = current_pack_name()
+    if not pack_name:
         return 0
     try:
-        pack = await bot.get_sticker_set(config.STICKER_PACK_NAME)
+        pack = await bot.get_sticker_set(pack_name)
     except Exception as e:  # noqa: BLE001 — a missing pack must not break the bot
-        logger.warning("sticker pack %r failed to load: %s", config.STICKER_PACK_NAME, e)
+        logger.warning("sticker pack %r failed to load: %s", pack_name, e)
         return 0
     for s in getattr(pack, "stickers", []):
         emoji = (getattr(s, "emoji", "") or "").strip()

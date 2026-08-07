@@ -445,6 +445,7 @@ def main():
     app.add_handler(CommandHandler("shutup", commands.cmd_shutup))
     app.add_handler(CommandHandler("yo", commands.cmd_yo))
     app.add_handler(CommandHandler("trend", commands.cmd_trend))
+    app.add_handler(CommandHandler("stickers", commands.cmd_stickers))
     app.add_handler(CallbackQueryHandler(commands.on_button))
     app.add_handler(InlineQueryHandler(on_inline))
     app.add_handler(MessageHandler(

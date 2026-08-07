@@ -316,7 +316,7 @@ def due_chats(now: float) -> list[dict]:
 
 # --- Kid state (global singletons: daily life, budget counters) -----------
 
-def get_kid_state(key: str, default: str = "") -> str:
+def get_kid_state(key: str, default: str | None = "") -> str | None:
     with _lock:
         row = _db().execute("SELECT value FROM kid_state WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default

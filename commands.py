@@ -17,6 +17,7 @@ import brainrot
 import chat_engine
 import db
 import guard
+import stickers
 import trends
 
 WELCOME = (
@@ -174,6 +175,62 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "usage: /trend [list | add <t> | ban <t> | remove <t> | refresh]"
     )
+
+
+def _extract_pack_name(raw: str) -> str:
+    """Pull a bare pack short-name out of whatever the owner pasted.
+
+    Accepts a bare name ("mypack") or a full invite link Telegram hands out
+    ("https://t.me/addstickers/mypack", with or without scheme/query string).
+    """
+    raw = raw.strip()
+    if "addstickers/" in raw:
+        raw = raw.split("addstickers/", 1)[1]
+    return raw.split("?", 1)[0].strip("/ \t")
+
+
+async def cmd_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only sticker pack control: /stickers [<pack_name_or_link> | off].
+
+    Stickers are sent from the owner's own Telegram pack. This lets the owner
+    swap it at runtime instead of editing STICKER_PACK_NAME in .env and
+    restarting — see stickers.load() for the kid_state-over-config resolution
+    order this writes into.
+    """
+    if not guard.is_owner(update.effective_user.id):
+        await update.message.reply_text("owner only 🔒")
+        return
+    args = context.args or []
+
+    if not args:
+        s = stickers.status()
+        if not s["pack_name"]:
+            await update.message.reply_text("stickers are off 🚫\nset one: /stickers <pack_name>")
+            return
+        await update.message.reply_text(
+            f"pack: {s['pack_name']}\n{s['count']} sticker(s) · {s['emoji_count']} emoji"
+        )
+        return
+
+    if args[0].lower() == "off":
+        db.set_kid_state(stickers.STICKER_PACK_KEY, "")
+        await stickers.load(context.bot)
+        await update.message.reply_text("stickers off 🚫")
+        return
+
+    pack_name = _extract_pack_name(args[0])
+    if not pack_name:
+        await update.message.reply_text("usage: /stickers [<pack_name_or_link> | off]")
+        return
+
+    db.set_kid_state(stickers.STICKER_PACK_KEY, pack_name)
+    count = await stickers.load(context.bot)
+    if count:
+        await update.message.reply_text(f"pack set ✅ {pack_name} — loaded {count} sticker(s)")
+    else:
+        await update.message.reply_text(
+            f"couldn't load pack {pack_name} 😭 (bad name, or it's empty) — stickers off for now"
+        )
 
 
 # --- Buttons --------------------------------------------------------------
