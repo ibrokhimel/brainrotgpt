@@ -31,19 +31,6 @@ def init_db(path: str | None = None) -> None:
     with _lock:
         _conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS generations (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id  INTEGER,
-                user_id  INTEGER,
-                persona  TEXT,
-                intensity TEXT,
-                tone     TEXT,
-                is_regen INTEGER,
-                tokens   INTEGER,
-                created  REAL
-            );
-            CREATE INDEX IF NOT EXISTS idx_gen_created ON generations(created);
-            CREATE INDEX IF NOT EXISTS idx_gen_persona ON generations(persona, created);
             CREATE TABLE IF NOT EXISTS trends (
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
                 term    TEXT UNIQUE COLLATE NOCASE,
@@ -93,8 +80,10 @@ def init_db(path: str | None = None) -> None:
         if "kind" not in tcols:
             _conn.execute("ALTER TABLE trends ADD COLUMN kind TEXT NOT NULL DEFAULT 'term'")
         # One-time cleanup: drop tables from the old generator surface so
-        # upgraded installs don't carry dead tables.
-        for dead in ("favorites", "subscriptions", "last_results", "settings"):
+        # upgraded installs don't carry dead tables. `generations` joins them:
+        # v3 has no persona/intensity/tone to attribute, so nothing writes it.
+        for dead in ("favorites", "subscriptions", "last_results", "settings",
+                     "generations"):
             _conn.execute(f"DROP TABLE IF EXISTS {dead}")
         _conn.commit()
 
@@ -113,61 +102,6 @@ def _db() -> sqlite3.Connection:
         init_db()
     assert _conn is not None
     return _conn
-
-
-# --- Analytics (generations) ---------------------------------------------
-
-def log_generation(
-    chat_id: int, user_id: int, persona: str, intensity: str,
-    tone: str, is_regen: bool, tokens: int,
-) -> None:
-    with _lock:
-        _db().execute(
-            """INSERT INTO generations
-               (chat_id, user_id, persona, intensity, tone, is_regen, tokens, created)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (chat_id, user_id, persona, intensity, tone, int(is_regen), tokens, time.time()),
-        )
-        _db().commit()
-
-
-def recent_generation_times(window_s: float = 60.0) -> list[tuple[int, float]]:
-    """(user_id, epoch) for generations in the last window — seeds the limiter."""
-    cutoff = time.time() - window_s
-    with _lock:
-        rows = _db().execute(
-            "SELECT user_id, created FROM generations WHERE created>=? ORDER BY created",
-            (cutoff,),
-        ).fetchall()
-    return [(r["user_id"], r["created"]) for r in rows]
-
-
-def leaderboard(days: int = 7, limit: int = 10) -> list[dict]:
-    cutoff = time.time() - days * 86400
-    with _lock:
-        rows = _db().execute(
-            """SELECT persona, COUNT(*) AS n FROM generations
-               WHERE created>=? GROUP BY persona ORDER BY n DESC LIMIT ?""",
-            (cutoff, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def stats() -> dict:
-    with _lock:
-        db = _db()
-        total = db.execute("SELECT COUNT(*) AS n FROM generations").fetchone()["n"]
-        users = db.execute(
-            "SELECT COUNT(DISTINCT user_id) AS n FROM generations"
-        ).fetchone()["n"]
-        day = db.execute(
-            "SELECT COUNT(*) AS n FROM generations WHERE created>=?",
-            (time.time() - 86400,),
-        ).fetchone()["n"]
-        regens = db.execute(
-            "SELECT COUNT(*) AS n FROM generations WHERE is_regen=1"
-        ).fetchone()["n"]
-    return {"total": total, "users": users, "last_24h": day, "regens": regens}
 
 
 # --- Trends (live brainrot vocab, manual + auto-fetched) ------------------

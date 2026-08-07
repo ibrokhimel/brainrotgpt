@@ -332,7 +332,6 @@ async def on_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_startup(app: Application):
     db.init_db()
-    limiter.seed(db.recent_generation_times(60))
     try:
         await app.bot.set_my_commands(commands.BOT_COMMANDS)
     except Exception as e:  # noqa: BLE001
@@ -428,7 +427,6 @@ def main():
     app.add_handler(CommandHandler("settings", commands.cmd_settings))
     app.add_handler(CommandHandler("shutup", commands.cmd_shutup))
     app.add_handler(CommandHandler("yo", commands.cmd_yo))
-    app.add_handler(CommandHandler("stats", commands.cmd_stats))
     app.add_handler(CommandHandler("trend", commands.cmd_trend))
     app.add_handler(CallbackQueryHandler(commands.on_button))
     app.add_handler(InlineQueryHandler(on_inline))

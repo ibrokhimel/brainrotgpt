@@ -62,7 +62,6 @@ emoji reaction, sometimes not for hours. Powered by Groq.
 | `/shutup` | mute the kid in this chat |
 | `/yo` | unmute and reset the ghost ladder |
 | `/trend` | owner-only: `list \| add <t> \| ban <t> \| remove <t> \| refresh` live slang/memes |
-| `/stats` | owner-only: usage stats |
 
 Inline mode (`@yourbot <text>` in any chat) also still works — it's a
 separate one-off generator, not the kid, and doesn't share his memory or bond.
@@ -135,7 +134,7 @@ CI runs ruff + pytest on push (`.github/workflows/ci.yml`).
 | `trends.py` | live slang/meme refresh from Reddit + Know Your Meme |
 | `budget.py` | the daily cap on LLM calls the user didn't ask for |
 | `guard.py` | access control, content screen, injection framing, token trim |
-| `db.py` | SQLite: chat state, kid state, message history, live trends, generation stats |
+| `db.py` | SQLite: chat state, kid state, message history, live trends |
 | `brainrot.py` | the old generator — now only powers inline mode |
 | `vision.py` | screenshot/photo → transcript (Groq vision) |
 | `rate_limit.py` | per-user cooldown + per-user/global caps (seeded from DB) |

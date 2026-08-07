@@ -10,16 +10,6 @@ def fresh_db():
     db.close()
 
 
-def test_analytics_and_leaderboard():
-    db.log_generation(1, 10, "gym_sigma", "medium", "default", False, 100)
-    db.log_generation(1, 10, "gym_sigma", "medium", "default", True, 50)
-    db.log_generation(1, 11, "doomer_prophet", "mild", "roast", False, 30)
-    lb = db.leaderboard(days=7)
-    assert lb[0]["persona"] == "gym_sigma" and lb[0]["n"] == 2
-    s = db.stats()
-    assert s["total"] == 3 and s["regens"] == 1 and s["users"] == 2
-
-
 # --- trends ---------------------------------------------------------------
 
 def test_trend_add_and_list():

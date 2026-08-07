@@ -194,3 +194,24 @@ def test_all_chat_ids_includes_chats_that_only_have_messages(tmp_path):
     _fresh(tmp_path)
     db.add_message(-200, "user", "group chatter with no chat_state row yet")
     assert -200 in db.all_chat_ids()
+
+
+def test_init_db_drops_a_legacy_generations_table(tmp_path):
+    """v3 has no persona/intensity/tone to attribute, so nothing writes this
+    table. Upgraded installs shouldn't carry it around, and leaving it would
+    let a future /stats read it and report stale v2 numbers as if they were
+    current."""
+    import sqlite3
+    path = str(tmp_path / "legacy.db")
+    db.close()
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE generations (id INTEGER PRIMARY KEY, persona TEXT)")
+    conn.execute("INSERT INTO generations (persona) VALUES ('gym_sigma')")
+    conn.commit()
+    conn.close()
+
+    db.init_db(path)
+    names = {r[0] for r in db._db().execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "generations" not in names
+    assert "chat_state" in names          # the migration still built the real schema

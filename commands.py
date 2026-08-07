@@ -28,7 +28,7 @@ WELCOME = (
 )
 
 # Commands shown in Telegram's "/" menu (set via set_my_commands on startup).
-# stats is owner-only, so it's intentionally left out of the public menu.
+# /trend is owner-only, so it's intentionally left out of the public menu.
 BOT_COMMANDS = [
     BotCommand("start", "wake the bot up 🗿"),
     BotCommand("settings", "mood · chattiness · mute 🎭"),
@@ -108,20 +108,6 @@ async def cmd_yo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     db.update_chat_state(chat_id, muted=0, gave_up=0, ping_stage=0)
     await update.message.reply_text("im back 🗿")
-
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not guard.is_owner(update.effective_user.id):
-        await update.message.reply_text("owner only 🔒")
-        return
-    s = db.stats()
-    await update.message.reply_text(
-        "📈 stats\n\n"
-        f"total generations: {s['total']}\n"
-        f"last 24h: {s['last_24h']}\n"
-        f"unique users: {s['users']}\n"
-        f"regenerates: {s['regens']}"
-    )
 
 
 async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
