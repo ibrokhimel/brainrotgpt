@@ -10,6 +10,8 @@ import logging
 import re
 from dataclasses import dataclass
 
+from telegram.error import Forbidden
+
 DELIM = "|||"
 
 # [sticker:💀] as a whole segment — the model's way of picking a sticker.
@@ -141,6 +143,11 @@ async def send(bot, chat_id: int, pieces: list[Piece], *, rng, sleeper,
                 await sleeper(typing_time(piece.value, rng=rng))
                 await bot.send_message(chat_id, piece.value, **reply_kw)
                 delivered.append(piece.value)
+        except Forbidden:
+            # The user blocked the bot — this must propagate so the caller can
+            # mute the chat permanently, not be swallowed like an ordinary
+            # send failure.
+            raise
         except Exception as e:  # noqa: BLE001 — one bad send shouldn't kill the burst
             logger.warning("burst send failed in chat %s: %s", chat_id, e)
             continue
