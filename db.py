@@ -352,6 +352,23 @@ def update_chat_state(chat_id: int, **fields) -> dict:
     return dict(row)
 
 
+def all_chat_ids() -> list[int]:
+    """Every chat the bot knows about, for maintenance jobs like pruning.
+
+    Deliberately not `due_chats`: that query's filters (next_action_at IS NOT
+    NULL, muted=0, gave_up=0) were written to decide what to *act* on, and
+    borrowing them for pruning skipped every group, muted, given-up and idle
+    chat — which are exactly the ones whose message tables grow unbounded.
+    Unions chat_state with messages so a group that has never had a state row
+    written is still reached.
+    """
+    with _lock:
+        rows = _db().execute(
+            "SELECT chat_id FROM chat_state UNION SELECT DISTINCT chat_id FROM messages"
+        ).fetchall()
+    return [r["chat_id"] for r in rows]
+
+
 def due_chats(now: float) -> list[dict]:
     """Chats with a scheduled action that is due. Muted and gave-up chats never fire."""
     with _lock:

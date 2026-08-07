@@ -32,8 +32,6 @@ logger = logging.getLogger("brainrotgpt.scheduler")
 
 _rng = random.Random()
 
-SESSION_TTL_S = 1800     # evict idle intake-session buffers after 30 min
-
 # Bond deltas from the ghost ladder — a person who chases and gets nothing
 # feels progressively less warm about it. apply_bond's per-message deltas
 # live in bot.py (the intake side); these live here because _do_ping is the
@@ -186,19 +184,12 @@ async def trend_refresh_job(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("trend refresh job failed: %s", e)
 
 
-async def cleanup_sessions(context: ContextTypes.DEFAULT_TYPE):
-    """Evict idle intake-session buffers and prune old chat messages.
+async def prune_job(context: ContextTypes.DEFAULT_TYPE):
+    """Enforce spec §3's 100-rows-per-chat cap on `messages`.
 
-    The session dict lives in bot.py (it backs live message intake), so it is
-    passed in via `context.job.data` rather than imported — scheduler.py must
-    not import bot.
+    This was `cleanup_sessions` and also evicted idle intake-session buffers.
+    bot.py has had no `sessions` dict since the generator surface was deleted,
+    so that half operated on the empty dict it was handed and did nothing.
     """
-    now = time.time()
-    sessions = context.job.data
-    stale = [cid for cid, s in sessions.items() if now - s.get("ts", now) > SESSION_TTL_S]
-    for cid in stale:
-        sessions.pop(cid, None)
-    if stale:
-        logger.info("cleaned %d idle session(s)", len(stale))
-    for chat_id in {row["chat_id"] for row in db.due_chats(now + 10**9)}:
+    for chat_id in db.all_chat_ids():
         db.prune_messages(chat_id)

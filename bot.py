@@ -353,10 +353,7 @@ async def on_startup(app: Application):
     await stickers.load(app.bot)
 
     app.job_queue.run_repeating(scheduler.tick, interval=60, first=10, name="tick")
-    # No more in-memory intake buffers to evict (bot.py has no `sessions` dict
-    # any more) — this job now exists purely to prune old rows out of `messages`.
-    app.job_queue.run_repeating(
-        scheduler.cleanup_sessions, interval=600, first=600, data={})
+    app.job_queue.run_repeating(scheduler.prune_job, interval=600, first=600, name="prune")
     app.job_queue.run_daily(
         scheduler.life_refresh_job,
         time=datetime.time(hour=config.LIFE_REFRESH_HOUR % 24),

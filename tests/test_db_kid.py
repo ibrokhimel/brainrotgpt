@@ -1,4 +1,5 @@
 import threading
+import time
 
 import config
 import db
@@ -166,3 +167,30 @@ def test_update_chat_state_takes_the_lock_once(tmp_path, monkeypatch):
 
     assert counter.acquires == 1
     assert db.get_chat_state(1)["bond"] == 7
+
+
+def test_all_chat_ids_reaches_chats_due_chats_never_returns(tmp_path):
+    """The prune job borrowed due_chats, whose filters were written for a
+    different purpose: next_action_at IS NOT NULL AND muted=0 AND gave_up=0.
+
+    So pruning never reached any group chat (groups reply synchronously and
+    never set next_action_at, yet on_group_message writes a messages row for
+    EVERY message in the group), nor any given-up, muted, or idle chat. Those
+    are precisely the chats whose message tables grow without bound.
+    """
+    _fresh(tmp_path)
+    db.update_chat_state(-100, next_action_at=None)          # a group: never scheduled
+    db.update_chat_state(2, gave_up=1)
+    db.update_chat_state(3, muted=1)
+    db.update_chat_state(4, next_action_at=time.time() + 10**6)   # idle, far future
+    db.update_chat_state(5, next_action_at=time.time() - 10)      # the only due one
+
+    assert set(db.all_chat_ids()) == {-100, 2, 3, 4, 5}
+    # What the old query saw, for contrast:
+    assert {r["chat_id"] for r in db.due_chats(time.time())} == {5}
+
+
+def test_all_chat_ids_includes_chats_that_only_have_messages(tmp_path):
+    _fresh(tmp_path)
+    db.add_message(-200, "user", "group chatter with no chat_state row yet")
+    assert -200 in db.all_chat_ids()
