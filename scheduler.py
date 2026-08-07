@@ -109,7 +109,7 @@ async def tick(context: ContextTypes.DEFAULT_TYPE):
                 await _do_cold_open(context.bot, chat_id, state)
         except Forbidden:
             logger.info("chat %s blocked the bot — muting permanently", chat_id)
-            db.update_chat_state(chat_id, muted=1, next_action_at=None)
+            db.update_chat_state(chat_id, muted=1, next_action_at=None, next_action_kind=None)
         except Exception as e:  # noqa: BLE001 — one bad chat must not stall the tick
             logger.warning("tick failed for chat %s: %s", chat_id, e)
             # A reply is owed to a person, so it gets one retry (spec §12) —
