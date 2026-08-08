@@ -273,6 +273,67 @@ def test_the_extractor_is_told_the_lines_are_the_other_persons_only(tmp_path, mo
     assert "is not a fact about this person" in low
 
 
+# --- durable facts only: the live DB filled up with events ------------------
+#
+# Stored alongside the real facts: "I sent a 💪 sticker", "I sent a 🌟 sticker",
+# "I'm back after being away". None of those stay true about a person, and each
+# one displaces something that does out of the forty-slot window.
+
+def test_a_sticker_is_not_a_fact(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "im walter")
+    monkeypatch.setattr(memory, "_ask", lambda p: _done(
+        "their name is walter\nsent a 💪 sticker\nI sent a 🌟 sticker"))
+    _run(memory.distill(1, db.get_chat_state(1)))
+    assert [f["fact"] for f in db.recent_facts(1)] == ["their name is walter"]
+
+
+def test_an_event_is_not_a_fact(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "im walter")
+    monkeypatch.setattr(memory, "_ask", lambda p: _done(
+        "they are back after being away\njust said hi\nasked how school was\n"
+        "works in IT"))
+    _run(memory.distill(1, db.get_chat_state(1)))
+    assert [f["fact"] for f in db.recent_facts(1)] == ["works in IT"]
+
+
+def test_the_durability_filter_keeps_real_facts_about_a_person(tmp_path, monkeypatch):
+    """The filter is aimed at events, not at anything that happens to mention a
+    verb. Over-filtering loses memory, which is the thing being protected."""
+    _fresh(tmp_path)
+    db.add_message(1, "user", "hi")
+    monkeypatch.setattr(memory, "_ask", lambda p: _done(
+        "their name is walter\nworks in IT and it drains them\nplays minecraft\n"
+        "lives in tashkent\nkeeps complaining about their boss\n"
+        "is saving up for a new pc"))
+    _run(memory.distill(1, db.get_chat_state(1)))
+    assert len(db.recent_facts(1)) == 6
+
+
+def test_a_pass_of_pure_junk_is_treated_as_nothing_to_record(tmp_path, monkeypatch):
+    """Filtered down to empty is a NONE, not a success -- the notes blob must
+    not be overwritten with nothing and the counter must back off."""
+    _fresh(tmp_path)
+    db.update_chat_state(1, notes="their name is walter", msgs_since_notes=20)
+    db.add_message(1, "user", "hi")
+    monkeypatch.setattr(memory, "_ask", lambda p: _done("sent a 🌟 sticker"))
+    assert _run(memory.distill(1, db.get_chat_state(1))) == "their name is walter"
+    assert db.recent_facts(1) == []
+
+
+def test_the_extractor_is_told_to_record_only_durable_things(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "hi")
+    seen = _capture(monkeypatch)
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    low = seen["prompt"].lower()
+    assert "stays true" in low
+    assert "not what they just did" in low
+    assert "sticker" in low
+
+
 def test_the_extractor_is_asked_for_one_consistent_voice(tmp_path, monkeypatch):
     """Half the live facts came back quoting the person ("I work in IT") and
     half describing them ("They work in IT."). db._normalise_fact now folds the

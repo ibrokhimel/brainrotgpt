@@ -45,10 +45,13 @@ _PROMPT = (
     "Write EVERY line in the THIRD PERSON about them: \"their name is walter\", "
     "\"works in IT and hates it\". Never write \"I\" or \"my\" and never quote them — "
     "you are describing them to someone else, not repeating their words.\n"
-    "Record anything a friend would remember: who they are, what they do, what they "
-    "like or hate, what they keep complaining about, plans they mentioned, running "
-    "jokes, how they talk. Small things count. Prefer several small facts over one "
-    "long one.\n"
+    "Record ONLY what STAYS TRUE about them: their name, what they do for work or "
+    "study, where they live, what they play or watch, what they like or hate, what "
+    "they keep complaining about, ongoing plans, running jokes. Prefer several small "
+    "facts over one long one.\n"
+    "NOT what they just did, and NOT what they sent. A sticker, an emoji, a photo, a "
+    "greeting, coming back after a while away, how they feel this minute — those are "
+    "events, not facts. If it will not still be true next week, leave it out.\n"
     "Record ONLY what the messages below actually say. Never invent a habit, a "
     "routine, a mood or a personality, and never turn an emoji or a sticker into a "
     "character trait. Anything the TEENAGER said, claimed, asked about, or is going "
@@ -62,6 +65,24 @@ _PROMPT = (
 
 # The model is told not to use bullets; it will anyway.
 _BULLET = re.compile(r"^\s*(?:[-*•·–]|\d+[.)])\s*")
+
+# It is told not to record events either, and it does that anyway too: the live
+# DB held "I sent a 💪 sticker", "I sent a 🌟 sticker" and "I'm back after being
+# away" among the real facts, each one displacing something durable out of the
+# forty-slot window. A fact is what is still true next week.
+#
+# Deliberately narrow, and aimed at the shapes actually observed. Over-filtering
+# costs memory, which is the thing being protected here, so bare "said"/"says"
+# are NOT in the list -- how someone talks is a running joke worth keeping, and
+# only "just said" is an event.
+_EVENT = re.compile(
+    r"\b(stickers?|emojis?|gifs?|selfies?)\b"
+    r"|\bsent\b|\bsends\b|\bsending\b"
+    r"|\basked\b|\basks\b|\breplied\b|\bgreeted\b|\btyped\b"
+    r"|\bjust (said|did|got|started|finished)\b"
+    r"|\b(is|are|re) back\b|\bcame back\b|\bwas away\b|\bbeing away\b",
+    re.I,
+)
 
 
 def transcript(chat_id: int, limit: int = 40) -> str:
@@ -129,11 +150,15 @@ async def _ask(prompt: str) -> str:
 
 
 def facts_from(raw: str) -> list[str]:
-    """Split a distillation into atomic, independently storable facts."""
+    """Split a distillation into atomic, independently storable facts.
+
+    Event lines are dropped here rather than in db.add_fact, so that they never
+    reach the notes blob either — the two are written from the same list.
+    """
     out: list[str] = []
     for line in (raw or "").splitlines():
         line = _BULLET.sub("", line).strip()
-        if not line or line.upper().strip(".!") == "NONE":
+        if not line or line.upper().strip(".!") == "NONE" or _EVENT.search(line):
             continue
         out.append(line[:FACT_MAX_CHARS])
         if len(out) >= FACTS_PER_PASS:
