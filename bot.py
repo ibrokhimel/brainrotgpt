@@ -207,16 +207,16 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < 120)
-    db.update_chat_state(chat_id, **intake_fields(
-        state, now, bond=apply_bond(state, text), engaged=engaged))
+    scheduler.arm_fast_reply(context.bot, chat_id, db.update_chat_state(
+        chat_id, **intake_fields(state, now, bond=apply_bond(state, text), engaged=engaged)))
 
 
-def _record_engaged_message(chat_id: int, state: dict, text: str) -> None:
+def _record_engaged_message(bot_obj, chat_id: int, state: dict, text: str) -> None:
     """Shared on_photo/on_sticker tail: record, schedule a reply, revive a given-up chat."""
     now = time.time()
     db.add_message(chat_id, "user", text)
-    db.update_chat_state(chat_id, **intake_fields(
-        state, now, bond=apply_bond(state, ""), engaged=True))
+    scheduler.arm_fast_reply(bot_obj, chat_id, db.update_chat_state(
+        chat_id, **intake_fields(state, now, bond=apply_bond(state, ""), engaged=True)))
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,7 +259,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ok:
         return
     limiter.record(user_id)
-    _record_engaged_message(chat_id, state, f"[they sent a picture. it shows: {transcript}]")
+    _record_engaged_message(context.bot, chat_id, state, f"[they sent a picture. it shows: {transcript}]")
 
 
 async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -277,7 +277,7 @@ async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = db.get_chat_state(chat_id)
     if state["muted"]:
         return
-    _record_engaged_message(chat_id, state, f"[they sent a sticker: {msg.sticker.emoji or '?'}]")
+    _record_engaged_message(context.bot, chat_id, state, f"[they sent a sticker: {msg.sticker.emoji or '?'}]")
 
 
 GROUP_MAX_MESSAGES = 2

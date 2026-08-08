@@ -303,6 +303,43 @@ def all_chat_ids() -> list[int]:
     return [r["chat_id"] for r in rows]
 
 
+def claim_due_action(chat_id: int, now: float,
+                     kinds: tuple[str, ...] | None = None) -> dict | None:
+    """Atomically take ownership of a chat's due action. Returns the row it was
+    claimed from, or None if there was nothing to claim.
+
+    The 60s tick and the in-process fast path (scheduler.arm_fast_reply) race
+    for the same row, so clearing `next_action_at` has to be the same
+    indivisible step as deciding to act on it: whichever caller gets here first
+    wins and the other is handed None. The whole read-modify-write is under
+    `_lock`, and there is no await inside it, so no second claimer can
+    interleave.
+
+    Restricting the claim to actions that are *already due* is what makes a
+    stale fast-path task harmless — a newer message that re-armed the row for
+    later leaves next_action_at in the future, so the old task claims nothing
+    instead of firing the pending reply early and clearing it.
+    """
+    where = ("chat_id=? AND next_action_at IS NOT NULL AND next_action_at <= ? "
+             "AND muted=0 AND gave_up=0")
+    args: list = [chat_id, now]
+    if kinds is not None:
+        # A NULL kind means "reply" everywhere else, so it has to here too.
+        where += f" AND COALESCE(next_action_kind, 'reply') IN ({','.join('?' * len(kinds))})"
+        args += list(kinds)
+    with _lock:
+        conn = _db()
+        row = conn.execute(f"SELECT * FROM chat_state WHERE {where}", args).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            f"UPDATE chat_state SET next_action_at=NULL, next_action_kind=NULL WHERE {where}",
+            args,
+        )
+        conn.commit()
+    return dict(row)
+
+
 def due_chats(now: float) -> list[dict]:
     """Chats with a scheduled action that is due. Muted and gave-up chats never fire."""
     with _lock:
