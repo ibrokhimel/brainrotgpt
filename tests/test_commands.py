@@ -412,3 +412,14 @@ def test_a_load_failure_during_capture_leaves_the_flag_armed_for_a_retry(monkeyp
     assert stickers.capture_pending()  # still waiting — send another sticker, no need to retype
     reply = update.message.replies[0].lower()
     assert "couldn't" in reply or "fail" in reply
+
+
+# --- /settings reads a mood that may predate the persona cull ---------------
+
+def test_settings_text_labels_a_retired_mood_as_the_default():
+    """Live rows carry mood='nerd', which is no longer a persona. /settings has
+    to name a real mood rather than echo the dead key back at the owner."""
+    db.update_chat_state(1, mood="nerd")
+    text = commands.settings_text(1).lower()
+    assert "nerd" not in text
+    assert "skibidi" in text

@@ -150,8 +150,7 @@ def _facts_for(state: dict) -> list[str]:
 def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
                         vocab: list[str], sticker_emoji: list[str],
                         burst_target: int, facts: list[str] | None = None) -> str:
-    mood_key = state.get("mood") or "skibidi"
-    mood = brainrot.PERSONA_BY_KEY.get(mood_key, brainrot.PERSONAS[1])
+    mood = brainrot.mood_persona(state.get("mood"))
     bond = int(state.get("bond") or 0)
     salty = bool(state.get("salty"))
     cold = salty or bond <= BOND_ANNOYED_MAX

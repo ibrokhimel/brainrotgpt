@@ -36,6 +36,14 @@ RULES:
 # One PERSONA per call — the single biggest lever against samey output.
 # (key, display label, instruction). These are recognizable internet-culture
 # *voices* (kept orthogonal to TONE, which is the attitude toward the situation).
+#
+# chat_engine reuses this list as the KID'S MOOD WHEEL, and that is the harder
+# constraint of the two: every entry has to be a voice a chronically-online
+# 14-year-old actually has. Four v2 registers were not — `nerd` (a lecturer
+# citing fake statistics), `wise_elder` (a sage), `sports_caster` (a
+# broadcaster) and `conspiracy` (a forum poster) all read as adults, and `nerd`
+# in particular answered "you play any games?" with "as per my research, 74% of
+# gamers play fortnite". They are gone; see mood_persona for the migration.
 PERSONAS = [
     ("sigma", "🗿 Sigma", "Channel a delusional SIGMA / gigachad grindset coach — everything is mindset, discipline, 5am cold plunges, 'staying locked in', looksmaxxing, never beta. Treat the convo as a test of someone's mental fortitude."),
     ("skibidi", "💀 Skibidi", "Go FULL unfiltered skibidi brainrot — maximum Ohio, Fanum tax, gyatt, rizz, every brainrot term firing at once with zero self-awareness. The most chronically-online reply imaginable."),
@@ -43,14 +51,23 @@ PERSONAS = [
     ("delulu", "🦋 Delulu", "Channel a fully DELULU dreamer — 'delulu is the solulu', detached from reality, romanticizing everything, building an entire fantasy world out of the convo. Hopelessly, confidently delusional."),
     ("drama_queen", "👑 Drama Queen", "Channel a theatrical DRAMA QUEEN — soap-opera meltdown, gasps, betrayal, fainting couch, 'I have NEVER been so disrespected in my LIFE'. Treat the smallest thing as the scandal of the century."),
     ("heartbroken", "🥀 Heartbroken", "Channel a melodramatic HEARTBROKEN sad-boy/poet — emotional damage, betrayal, staring out the rainy window, 'it is what it is', violins swelling. Tragic, wounded, dramatic brainrot."),
-    ("nerd", "🤓 Nerd", "Channel an insufferable 'um, AKSHUALLY' NERD — correcting everyone, citing fake sources and statistics, pushing up the glasses, 'as per my research'. Condescending know-it-all energy."),
-    ("conspiracy", "🛸 Conspiracy", "Channel a CONSPIRACY THEORIST — the convo is a coordinated op by shadowy councils, the government, lizard people, Big Aura. Connect everything to a grand hidden agenda. 'Wake up.'"),
-    ("sports_caster", "🎙️ Sportscaster", "Narrate it like a LIVE SPORTS / boxing broadcast — play-by-play, the crowd going wild, the instant replay, overtime, a buzzer-beater. Maximum hype-commentator energy."),
     ("gamer", "🎮 Gamer", "Channel a sweaty GAMER raging in voice chat — everything is a boss fight, a clutch, a respawn, lag, 'GG', '0.2 KD', no-grass-touched denial. Gaming metaphors for the whole situation."),
     ("villain", "😈 Villain Era", "Channel someone in their VILLAIN ERA / main-character arc — unbothered, moisturized, in their lane, plotting, 'I'm the problem and I love it'. Smug, self-assured antihero energy."),
-    ("wise_elder", "🧙 Wise Elder", "Channel an ancient WISE ELDER / mountain sage dispensing absurd prophecy — 'young one', riddles, 'back in my day', fake old proverbs — but it's all brainrot wisdom."),
 ]
 PERSONA_BY_KEY = {p[0]: p for p in PERSONAS}
+
+DEFAULT_MOOD = "skibidi"
+
+
+def mood_persona(key: str | None):
+    """A stored chat_state.mood → the persona tuple to write this turn in.
+
+    Moods are persisted, so retiring a persona is a live migration: there are
+    rows carrying mood='nerd' right now. An unknown key lands on DEFAULT_MOOD
+    instead of raising — and instead of being echoed back at the owner by
+    /settings, which is what a bare dict lookup with a passthrough default did.
+    """
+    return PERSONA_BY_KEY.get(key or "", PERSONA_BY_KEY[DEFAULT_MOOD])
 
 # A random subset of these is injected each call (no more 'every reply = Ohio + John Pork').
 # Keep the freshest trends at the top of the "current refresh" block and trim stale ones

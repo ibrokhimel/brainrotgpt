@@ -63,7 +63,7 @@ _rng = random.Random()
 
 def settings_text(chat_id: int) -> str:
     s = db.get_chat_state(chat_id)
-    mood = brainrot.PERSONA_BY_KEY.get(s["mood"], ("", s["mood"], ""))[1]
+    mood = brainrot.mood_persona(s["mood"])[1]
     status = "muted 🔇" if s["muted"] else "around 🟢"
     return (f"{chat_engine.KID_NAME} rn 🗿\n\n"
             f"mood: {mood}\nchattiness: {s['chattiness']}\nstatus: {status}")

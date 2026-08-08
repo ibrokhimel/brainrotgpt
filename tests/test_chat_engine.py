@@ -27,6 +27,14 @@ def test_prompt_carries_the_current_mood():
     assert "SIGMA" in _prompt(state={"mood": "sigma"}).upper()
 
 
+def test_a_retired_mood_in_the_db_does_not_break_the_prompt():
+    """`nerd` is in live chat_state rows and is no longer a persona. It has to
+    degrade to the default mood rather than crash or leak the lecturer voice."""
+    p = _prompt(state={"mood": "nerd"})
+    assert "SKIBIDI" in p.upper()
+    assert "as per my research" not in p.lower()
+
+
 def test_prompt_includes_the_day_state():
     assert "mom took my phone" in _prompt(day_state="mom took my phone")
 
