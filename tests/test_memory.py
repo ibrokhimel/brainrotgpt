@@ -164,3 +164,128 @@ def test_a_successful_pass_spends_budget(tmp_path, monkeypatch):
 
 async def _done(value):
     return value
+
+
+# --- the extractor must only ever read the OTHER person's words -------------
+#
+# Live, every fact stored for the owner's chat was extracted from the KID's own
+# messages and attributed to the owner:
+#
+#     They are in a "locked in mode"        <- the kid said "stay locked in"
+#     They have a laundry task              <- the kid's own day_state
+#     They take a cold plunge every morning <- invented by the sigma mood
+#     They sent a sticker: 💪               <- the kid's own emoji
+#
+# transcript() renders both sides, and the kid sends two or three messages per
+# turn against the user's one, so the window handed to the extractor was ~80%
+# bot output. Those facts then came back as WHAT YOU KNOW ABOUT THEM and the kid
+# doubled down: "yo whats up" -> "u still on laundry duty fr 🗿". A closed loop
+# amplifying its own hallucinations, which is why memory made the bot worse.
+
+def _capture(monkeypatch, reply="NONE"):
+    seen = {}
+
+    async def fake(prompt):
+        seen["prompt"] = prompt
+        return reply
+
+    monkeypatch.setattr(memory, "_ask", fake)
+    return seen
+
+
+def test_user_transcript_contains_only_the_users_own_lines(tmp_path):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "im walter")
+    db.add_message(1, "kid", "stay locked in bro")
+    db.add_message(1, "user", "i hate my job")
+    out = memory.user_transcript(1)
+    assert "im walter" in out and "i hate my job" in out
+    assert "locked in" not in out
+    assert "me:" not in out
+
+
+def test_the_user_window_is_not_eaten_by_the_kids_own_messages(tmp_path):
+    """The kid sends two or three messages per turn to the user's one, so a
+    mixed window of N is mostly bot output. Filtering has to happen in the
+    query, not after the rows come back."""
+    _fresh(tmp_path)
+    db.add_message(1, "user", "the oldest thing i said")
+    for i in range(50):
+        db.add_message(1, "kid", f"kid line {i}")
+    db.add_message(1, "user", "the newest thing i said")
+    out = memory.user_transcript(1, limit=5)
+    assert "the oldest thing i said" in out
+    assert "the newest thing i said" in out
+    assert "kid line" not in out
+
+
+def test_the_kids_own_lines_never_reach_the_extractor(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "im walter")
+    db.add_message(1, "kid", "discipline over feelings no cap 💪")
+    db.add_message(1, "kid", "cold plunge every morning fr")
+    seen = _capture(monkeypatch)
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    prompt = seen["prompt"]
+    assert "im walter" in prompt
+    assert "discipline over feelings" not in prompt
+    assert "cold plunge" not in prompt
+
+
+def test_facts_still_come_from_the_users_lines_in_the_same_transcript(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "im walter and i hate my job")
+    db.add_message(1, "kid", "stay locked in bro 💪")
+    _capture(monkeypatch, "their name is walter\nhates their job")
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    assert {f["fact"] for f in db.recent_facts(1)} == {"their name is walter",
+                                                       "hates their job"}
+
+
+def test_the_kids_day_state_never_becomes_a_fact_about_them(tmp_path, monkeypatch):
+    """life.current() is the KID's day. "They have a laundry task" is how the
+    owner ended up being told they were on laundry duty."""
+    _fresh(tmp_path)
+    db.add_message(1, "user", "yo whats up")
+    db.add_message(1, "kid", "folding laundry all day mom took my phone")
+    seen = _capture(monkeypatch)
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    assert "laundry" not in seen["prompt"]
+    assert db.recent_facts(1) == []
+
+
+def test_the_extractor_is_told_the_lines_are_the_other_persons_only(tmp_path, monkeypatch):
+    """Second line of defence behind the filtering: the prompt has to say whose
+    words these are, and that the teenager's own life is never a fact."""
+    _fresh(tmp_path)
+    db.add_message(1, "user", "hi")
+    seen = _capture(monkeypatch)
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    low = seen["prompt"].lower()
+    assert "person's own words" in low
+    assert "the teenager's replies are not included" in low
+    assert "stated about themselves" in low
+    assert "never invent" in low
+    assert "is not a fact about this person" in low
+
+
+def test_a_chat_with_only_kid_messages_never_asks_the_model(tmp_path, monkeypatch):
+    """A cold open they never answered. There is nothing to know, and asking
+    anyway is exactly how the kid's own monologue became facts about them."""
+    _fresh(tmp_path)
+    db.add_message(1, "kid", "yo u up")
+    db.add_message(1, "kid", "stay locked in")
+
+    async def never(prompt):
+        raise AssertionError("handed the model the kid's own monologue")
+
+    monkeypatch.setattr(memory, "_ask", never)
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    assert db.recent_facts(1) == []
+    # Nothing yet, not a failure: back off a few messages, don't burn the cycle.
+    assert db.get_chat_state(1)["msgs_since_notes"] == memory.NOTES_EVERY - memory.NONE_BACKOFF

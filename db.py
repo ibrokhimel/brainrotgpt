@@ -232,13 +232,21 @@ def add_message(chat_id: int, role: str, text: str) -> None:
         _db().commit()
 
 
-def recent_messages(chat_id: int, limit: int = 20) -> list[dict]:
-    """The newest `limit` messages, returned oldest-first for prompt assembly."""
+def recent_messages(chat_id: int, limit: int = 20, role: str | None = None) -> list[dict]:
+    """The newest `limit` messages, returned oldest-first for prompt assembly.
+
+    `role` filters inside the query rather than after the rows come back, which
+    matters: the kid sends two or three messages per turn against the user's
+    one, so a mixed window of N is mostly the kid's own output and filtering it
+    afterwards leaves a handful of lines.
+    """
+    q = "SELECT role, text, ts FROM messages WHERE chat_id=?"
+    args: list = [chat_id]
+    if role is not None:
+        q += " AND role=?"
+        args.append(role)
     with _lock:
-        rows = _db().execute(
-            "SELECT role, text, ts FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?",
-            (chat_id, limit),
-        ).fetchall()
+        rows = _db().execute(f"{q} ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]
 
 
@@ -312,6 +320,19 @@ def recent_facts(chat_id: int, limit: int = FACTS_MAX) -> list[dict]:
             (chat_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def clear_facts(chat_id: int) -> int:
+    """Drop everything the kid thinks it knows about one chat. Returns the count.
+
+    Needed because the first version of the extractor read the whole rendered
+    transcript, which includes the kid's own lines, so it summarised the bot's
+    output and filed it under the person it was texting.
+    """
+    with _lock:
+        cur = _db().execute("DELETE FROM facts WHERE chat_id=?", (chat_id,))
+        _db().commit()
+        return cur.rowcount
 
 
 def prune_facts(chat_id: int, keep: int = FACTS_MAX) -> int:

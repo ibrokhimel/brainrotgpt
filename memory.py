@@ -38,17 +38,23 @@ _clients = [AsyncGroq(api_key=k) for k in config.GROQ_KEYS]
 # The bar for "worth recording" is deliberately low — this is a 14-year-old
 # remembering their friend, not a CRM qualifying a lead.
 _PROMPT = (
-    "Below is a chat between a teenager and someone they text. List what is known "
-    "about the OTHER person, ONE SHORT FACT PER LINE. Max 12 words per line. No "
-    "bullets, no numbering, no headings, no commentary.\n"
+    "Below are messages ONE person sent to a teenager. Every line is that person's "
+    "own words. The teenager's replies are NOT included.\n"
+    "List what this person has stated about themselves, ONE SHORT FACT PER LINE. "
+    "Max 12 words per line. No bullets, no numbering, no headings, no commentary.\n"
     "Record anything a friend would remember: who they are, what they do, what they "
     "like or hate, what they keep complaining about, plans they mentioned, running "
     "jokes, how they talk. Small things count. Prefer several small facts over one "
     "long one.\n"
-    "Include facts from EXISTING NOTES that still hold. Never speculate and never "
-    "record anything about the teenager. Only if the chat says literally nothing "
-    "about the other person, reply with the single word NONE.\n\n"
-    "EXISTING NOTES:\n{notes}\n\nCHAT:\n{chat}"
+    "Record ONLY what the messages below actually say. Never invent a habit, a "
+    "routine, a mood or a personality, and never turn an emoji or a sticker into a "
+    "character trait. Anything the TEENAGER said, claimed, asked about, or is going "
+    "through — their school, their chores, their phone, their day — is not a fact "
+    "about this person, even if it came up in the conversation.\n"
+    "Include facts from EXISTING NOTES that still hold, and drop any that these "
+    "messages contradict. If the messages say nothing durable about the person, "
+    "reply with the single word NONE.\n\n"
+    "EXISTING NOTES:\n{notes}\n\nMESSAGES FROM THEM:\n{chat}"
 )
 
 # The model is told not to use bullets; it will anyway.
@@ -56,11 +62,34 @@ _BULLET = re.compile(r"^\s*(?:[-*•·–]|\d+[.)])\s*")
 
 
 def transcript(chat_id: int, limit: int = 40) -> str:
-    """Render the recent window for the prompt. 'them' is the user, 'me' the kid."""
+    """Render the recent window for the prompt. 'them' is the user, 'me' the kid.
+
+    Both sides, because generating a reply needs to see the conversation. NOT
+    for the extractor — see `user_transcript`.
+    """
     rows = db.recent_messages(chat_id, limit=limit)
     return "\n".join(
         f"{'me' if r['role'] == 'kid' else 'them'}: {r['text']}" for r in rows
     )
+
+
+def user_transcript(chat_id: int, limit: int = 40) -> str:
+    """Only the other person's own lines — what the extractor is allowed to read.
+
+    The first version handed the extractor the full rendered `transcript`, and
+    since the kid sends two or three messages per turn against the user's one,
+    that window was roughly 80% bot output. Everything it stored was therefore a
+    summary of the kid's own messages filed as a fact about the person: the
+    kid's sigma mood became "they are disciplined", the kid's day-state became
+    "they have a laundry task", a 💪 the kid sent became "they are strong". Those
+    facts then came back as WHAT YOU KNOW ABOUT THEM and the kid acted on them,
+    so the hallucinations compounded on themselves every cycle.
+
+    Filtering at the source is the fix. Instructing the model to ignore the
+    kid's lines would leave them one bad inference away from being recorded.
+    """
+    rows = db.recent_messages(chat_id, limit=limit, role="user")
+    return "\n".join(f"them: {r['text']}" for r in rows)
 
 
 def last_kid_message(chat_id: int, limit: int = 10) -> str:
@@ -123,9 +152,17 @@ async def distill(chat_id: int, state: dict) -> str:
     """
     old = state.get("notes") or ""
     notes, since = old, 0
+    chat = user_transcript(chat_id)
+    if not chat:
+        # Nothing from them at all — a cold open they never answered. There is
+        # nothing to know, and asking anyway is how the kid's own monologue used
+        # to become facts about them. Same shape as a NONE: try again shortly.
+        db.update_chat_state(chat_id, notes=notes,
+                             msgs_since_notes=max(0, NOTES_EVERY - NONE_BACKOFF))
+        return notes
     if budget.can_spend(time.time()):
         try:
-            raw = await _ask(_PROMPT.format(notes=old or "(none)", chat=transcript(chat_id)))
+            raw = await _ask(_PROMPT.format(notes=old or "(none)", chat=chat))
             budget.spend(time.time())
             facts = facts_from(raw)
             if facts:

@@ -282,3 +282,32 @@ def test_init_db_drops_a_legacy_generations_table(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "generations" not in names
     assert "chat_state" in names          # the migration still built the real schema
+
+
+def test_clear_facts_empties_one_chat_and_leaves_others_alone(tmp_path):
+    """Needed to purge production: every fact stored so far was extracted from
+    the kid's own messages and attributed to the person it was texting."""
+    _fresh(tmp_path)
+    db.add_fact(1, "they are disciplined")
+    db.add_fact(1, "they have a laundry task")
+    db.add_fact(2, "their name is jesse")
+    assert db.clear_facts(1) == 2
+    assert db.recent_facts(1) == []
+    assert [f["fact"] for f in db.recent_facts(2)] == ["their name is jesse"]
+
+
+def test_clear_facts_on_a_chat_with_none_is_a_no_op(tmp_path):
+    _fresh(tmp_path)
+    assert db.clear_facts(999) == 0
+
+
+def test_recent_messages_can_be_filtered_to_one_role(tmp_path):
+    """The window has to be filtered in the query: the kid sends two or three
+    messages per turn, so a mixed window of N is mostly the kid's own output."""
+    _fresh(tmp_path)
+    db.add_message(1, "user", "oldest user line")
+    for i in range(30):
+        db.add_message(1, "kid", f"k{i}")
+    db.add_message(1, "user", "newest user line")
+    rows = db.recent_messages(1, limit=5, role="user")
+    assert [r["text"] for r in rows] == ["oldest user line", "newest user line"]
