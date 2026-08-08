@@ -207,15 +207,47 @@ _PING_ENERGY = {
 }
 
 
+# Live, three consecutive pings came back "hey / idk what to say lol",
+# "hey / idk lol", "hey / sitll bored". _PING_ENERGY already varies by stage, so
+# the repetition is happening WITHIN a stage's output: the model was handed the
+# transcript and nothing else, and restating the last line is the cheapest thing
+# it can do. Naming the exact sentence is the point — "be original" gives it
+# nothing to diverge from.
+_PING_NO_REPEAT = (
+    "HARD RULE — your last message was: {last}\n"
+    "Do NOT repeat it, paraphrase it, or open with the same word it opened with. "
+    "If you already said you were bored, you cannot say it again. This is not a "
+    "greeting either — you are mid-conversation with them. A ping is a NEW angle: "
+    "a fresh thought, a callback to something specific they told you, or something "
+    "random that just happened to you."
+)
+_PING_NO_REPEAT_FIRST = (
+    "HARD RULE — do not open with a bare greeting, and do not say the same word "
+    "twice running. A ping is a new angle: a fresh thought, a callback to something "
+    "specific, or something random that just happened to you."
+)
+PING_LAST_MAX_CHARS = 160   # the kid's own output, but keep it bounded in the prompt
+
+
+def _ping_divergence(chat_id: int) -> str:
+    last = memory.last_kid_message(chat_id)[:PING_LAST_MAX_CHARS].strip()
+    if not last:
+        return _PING_NO_REPEAT_FIRST
+    # Quoted with repr so the model sees where the kid's own text starts and
+    # ends. It reaches the prompt inside guard.wrap_untrusted's transcript
+    # already; this is the same content, pointed at.
+    return _PING_NO_REPEAT.format(last=repr(last))
+
+
 async def ping(chat_id: int, state: dict, stage: int, *, rng) -> list[burst.Piece]:
     """A ghost-ladder nudge. Budgeted, and routed to the cheap model."""
     if not budget.can_spend(time.time()):
         return []
     system = _context(state, rng=rng, target=1)
     convo = guard.wrap_untrusted(memory.transcript(chat_id, limit=6))
-    user = (f"{convo}\n\nThey have not replied. {_PING_ENERGY.get(stage, _PING_ENERGY[1])} "
-            f"Send 1-2 very short messages, separated by |||. You may reference what "
-            f"you were last talking about.")
+    user = (f"{convo}\n\nThey have not replied. {_PING_ENERGY.get(stage, _PING_ENERGY[1])}\n\n"
+            f"{_ping_divergence(chat_id)}\n\n"
+            f"Send 1-2 very short messages, separated by |||.")
     pieces = await _generate(system, user, model=config.GROQ_FALLBACK_MODEL,
                              temperature=1.1, max_tokens=120, max_msgs=2)
     if pieces:

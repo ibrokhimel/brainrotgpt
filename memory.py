@@ -38,6 +38,19 @@ def transcript(chat_id: int, limit: int = 20) -> str:
     )
 
 
+def last_kid_message(chat_id: int, limit: int = 10) -> str:
+    """The kid's own most recent line, or "" if it hasn't spoken yet.
+
+    The ghost ping needs this to be told what NOT to say again. Handing the
+    model the transcript is not enough — it has to be pointed at the specific
+    sentence it is being asked to diverge from.
+    """
+    for row in reversed(db.recent_messages(chat_id, limit=limit)):
+        if row["role"] == "kid":
+            return row["text"]
+    return ""
+
+
 def should_distill(state: dict) -> bool:
     return int(state.get("msgs_since_notes") or 0) >= NOTES_EVERY
 

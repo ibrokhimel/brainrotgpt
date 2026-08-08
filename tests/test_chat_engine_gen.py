@@ -79,6 +79,54 @@ def test_ping_uses_the_cheap_model(tmp_path, monkeypatch):
     assert seen["model"] == config.GROQ_FALLBACK_MODEL
 
 
+# --- Fix 3: a ping must not restate the kid's own last message --------------
+
+def test_a_ping_is_told_not_to_repeat_the_kids_own_last_message(tmp_path, monkeypatch):
+    """Live, three consecutive pings:
+
+        kid 18:21  hey / idk what to say lol
+        kid 18:43  hey / idk lol            <- ping
+        kid 19:03  hey / sitll bored        <- ping
+
+    The transcript was handed to the model but nothing ever told it not to
+    restate itself, so it took the path of least resistance every time. The
+    divergence rule has to name the kid's ACTUAL last message -- a generic
+    "be original" does not give the model anything to diverge from.
+    """
+    _fresh(tmp_path)
+    seen = _patch(monkeypatch, "yo")
+    db.add_message(1, "user", "hey")
+    db.add_message(1, "kid", "idk what to say lol")
+    _run(chat_engine.ping(1, db.get_chat_state(1), 1, rng=random.Random(0)))
+
+    user = seen["messages"][1]["content"]
+    assert user.count("idk what to say lol") >= 2, "quoted in the transcript but not in the rule"
+    assert "repeat" in user.lower()
+    assert "same word" in user.lower()      # never open with the same word twice running
+
+
+def test_every_rung_of_the_ladder_gets_the_divergence_rule(tmp_path, monkeypatch):
+    """_PING_ENERGY already varies by stage; the repetition happens WITHIN a
+    stage's output, so the rule cannot live on one rung."""
+    _fresh(tmp_path)
+    seen = _patch(monkeypatch, "yo")
+    db.add_message(1, "kid", "so bored")
+    for stage in range(1, 6):
+        _run(chat_engine.ping(1, db.get_chat_state(1), stage, rng=random.Random(0)))
+        assert seen["messages"][1]["content"].count("so bored") >= 2, f"stage {stage}"
+
+
+def test_a_ping_with_no_previous_kid_message_still_generates(tmp_path, monkeypatch):
+    """First contact has nothing to diverge from. The rule must degrade to a
+    general one rather than quoting an empty string at the model."""
+    _fresh(tmp_path)
+    seen = _patch(monkeypatch, "yo")
+    pieces = _run(chat_engine.ping(1, db.get_chat_state(1), 1, rng=random.Random(0)))
+
+    assert [p.value for p in pieces] == ["yo"]
+    assert "''" not in seen["messages"][1]["content"]
+
+
 def test_ping_returns_nothing_when_the_budget_is_gone(tmp_path, monkeypatch):
     _fresh(tmp_path)
     config.OUTBOUND_DAILY_BUDGET = 1

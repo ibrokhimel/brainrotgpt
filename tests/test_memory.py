@@ -28,6 +28,21 @@ def test_transcript_is_empty_for_a_new_chat(tmp_path):
     assert memory.transcript(999) == ""
 
 
+def test_last_kid_message_is_the_kids_own_most_recent_line(tmp_path):
+    """The ghost ping's divergence rule needs the thing it must not repeat."""
+    _fresh(tmp_path)
+    db.add_message(1, "kid", "so bored")
+    db.add_message(1, "user", "same")
+    db.add_message(1, "kid", "still bored")
+    assert memory.last_kid_message(1) == "still bored"
+
+
+def test_last_kid_message_is_empty_when_the_kid_has_not_spoken(tmp_path):
+    _fresh(tmp_path)
+    db.add_message(1, "user", "hello?")
+    assert memory.last_kid_message(1) == ""
+
+
 def test_should_distill_only_at_the_threshold(tmp_path):
     _fresh(tmp_path)
     assert not memory.should_distill({"msgs_since_notes": 3})
