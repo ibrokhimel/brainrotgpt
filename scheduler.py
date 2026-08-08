@@ -33,6 +33,7 @@ import db
 import ghost
 import life
 import memory
+import persona
 import stickers
 import trends
 
@@ -230,7 +231,7 @@ async def _run_action(bot_obj, chat_id: int, state: dict, now: float, today: str
 async def _do_reply(bot_obj, chat_id: int, state: dict, now: float) -> bool:
     """Answer a due reply. Returns False if nothing reached them, so the tick
     can re-arm the one retry spec §12 asks for."""
-    if chat_engine.should_reroll_mood(state, now, rng=_rng):
+    if persona.should_reroll_mood(state, now, rng=_rng):
         mood = _rng.choice(brainrot.PERSONAS)[0]
         state = db.update_chat_state(chat_id, mood=mood, mood_set_at=now)
     pieces = await chat_engine.reply(chat_id, state, rng=_rng)

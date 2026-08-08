@@ -82,7 +82,7 @@ def _quiet(monkeypatch):
     monkeypatch.setattr(scheduler.burst, "apply_typos", lambda pieces, *, rng: pieces)
     monkeypatch.setattr(scheduler.stickers, "enabled", lambda: False)
     monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     monkeypatch.setattr(scheduler.config, "GHOST_ENABLED", False)
     monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
     monkeypatch.setattr(scheduler.memory, "should_distill", lambda state: False)

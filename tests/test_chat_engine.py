@@ -1,6 +1,7 @@
 import random
 
 import chat_engine
+import persona
 import recall
 
 STATE = {"mood": "sigma", "bond": 0, "notes": "", "salty": 0, "chattiness": "normal",
@@ -11,13 +12,13 @@ def _prompt(**over):
     state = dict(STATE, **over.pop("state", {}))
     kw = dict(day_state="", memes=[], vocab=["rizz"], sticker_emoji=[], burst_target=2)
     kw.update(over)
-    return chat_engine.build_system_prompt(state, **kw)
+    return persona.build_system_prompt(state, **kw)
 
 
 def test_prompt_names_the_kid_and_its_age():
     p = _prompt()
-    assert chat_engine.KID_NAME in p
-    assert str(chat_engine.KID_AGE) in p
+    assert persona.KID_NAME in p
+    assert str(persona.KID_AGE) in p
 
 
 def test_prompt_includes_the_burst_delimiter_instruction():
@@ -83,13 +84,13 @@ def test_the_slang_list_arrives_as_a_requirement_not_a_suggestion():
     """`SLANG TO LEAN ON: ...` was a list with no obligation attached, and the
     model ignored it: live output was `hey`, `idk lol`, `so bored`, `u fold
     laundry yet` while the whole vocab block went unused."""
-    assert chat_engine.VOCAB_RULE in _prompt(vocab=["gyatt 🍑", "aura farming 📈"])
-    assert chat_engine.VOCAB_RULE not in _prompt(vocab=[])
+    assert persona.VOCAB_RULE in _prompt(vocab=["gyatt 🍑", "aura farming 📈"])
+    assert persona.VOCAB_RULE not in _prompt(vocab=[])
 
 
 def test_the_mood_is_pushed_rather_than_merely_mentioned():
     """brainrot.PERSONAS' mood descriptions are vivid and were barely surfacing."""
-    assert chat_engine.MOOD_RULE in _prompt()
+    assert persona.MOOD_RULE in _prompt()
 
 
 def test_the_prompt_names_bland_shortness_as_the_failure():
@@ -120,7 +121,7 @@ def test_the_format_rules_survive_the_rebalance():
 
 def test_the_prompt_requires_an_on_topic_reply():
     p = _prompt()
-    assert chat_engine.RELEVANCE_RULE in p
+    assert persona.RELEVANCE_RULE in p
     low = p.lower()
     assert "on-topic" in low
     assert "never ignore what they said" in low
@@ -130,7 +131,7 @@ def test_relevance_outranks_the_style_rules():
     """Order is the whole point: when voice and relevance pull apart the model
     should already have read that relevance wins."""
     p = _prompt()
-    assert p.index(chat_engine.RELEVANCE_RULE) < p.index(chat_engine.HOW_YOU_TEXT)
+    assert p.index(persona.RELEVANCE_RULE) < p.index(persona.HOW_YOU_TEXT)
 
 
 def test_the_licence_to_ignore_the_question_is_gone():
@@ -154,19 +155,19 @@ def test_the_day_state_arrives_as_context_rather_than_a_nudge():
     """`Bring it up if it fits. Don't force it.` ran on every single turn and
     is why laundry kept surfacing regardless of the message."""
     p = _prompt(day_state="folding laundry all day")
-    assert chat_engine.DAY_STATE_RULE in p
+    assert persona.DAY_STATE_RULE in p
     low = p.lower()
     assert "don't force it" not in low
     assert "only if it actually connects to what they just said" in low
 
 
 def test_the_day_state_rule_is_absent_when_there_is_no_day_state():
-    assert chat_engine.DAY_STATE_RULE not in _prompt()
+    assert persona.DAY_STATE_RULE not in _prompt()
 
 
 def test_the_notes_block_is_conditional_too():
-    assert chat_engine.NOTES_RULE in _prompt(state={"notes": "their name is walter"})
-    assert chat_engine.NOTES_RULE not in _prompt()
+    assert persona.NOTES_RULE in _prompt(state={"notes": "their name is walter"})
+    assert persona.NOTES_RULE not in _prompt()
 
 
 # --- The kid is ADHD, and is not a nerd -------------------------------------
@@ -194,7 +195,7 @@ def test_correcting_and_explaining_are_banned_too():
 
 def test_the_kid_actually_reads_as_adhd():
     p = _prompt()
-    assert chat_engine.ADHD_RULE in p
+    assert persona.ADHD_RULE in p
     low = p.lower()
     assert "mid-sentence" in low                       # abandons thoughts
     assert "tangent" in low                            # derails
@@ -212,7 +213,7 @@ def test_adhd_is_not_a_licence_to_go_off_topic():
 
 def test_relevance_still_outranks_the_adhd_energy():
     p = _prompt()
-    assert p.index(chat_engine.RELEVANCE_RULE) < p.index(chat_engine.ADHD_RULE)
+    assert p.index(persona.RELEVANCE_RULE) < p.index(persona.ADHD_RULE)
 
 
 def test_relevance_governs_the_subject_not_the_length():
@@ -239,7 +240,7 @@ def test_the_memory_block_is_untouched_by_the_ban_on_facts():
     p = _prompt(facts=["their name is walter", "works in IT and it drains them"])
     assert "WHAT YOU KNOW ABOUT THEM" in p
     assert "works in IT and it drains them" in p
-    assert chat_engine.FACTS_RULE in p
+    assert persona.FACTS_RULE in p
 
 
 # --- It has to be allowed to not know things --------------------------------
@@ -252,7 +253,7 @@ def test_the_memory_block_is_untouched_by_the_ban_on_facts():
 
 def test_the_prompt_forbids_faking_recognition():
     p = _prompt()
-    assert chat_engine.HONESTY_RULE in p
+    assert persona.HONESTY_RULE in p
     low = p.lower()
     assert "never fake recognition" in low
     assert "never invent" in low
@@ -277,25 +278,25 @@ def test_it_may_not_invent_facts_about_them_either():
 
 
 def test_bond_line_changes_across_buckets():
-    low = chat_engine.bond_line(-50)
-    mid = chat_engine.bond_line(5)
-    high = chat_engine.bond_line(80)
+    low = persona.bond_line(-50)
+    mid = persona.bond_line(5)
+    high = persona.bond_line(80)
     assert len({low, mid, high}) == 3
 
 
 def test_bond_line_appears_in_the_prompt():
-    assert chat_engine.bond_line(80) in _prompt(state={"bond": 80})
+    assert persona.bond_line(80) in _prompt(state={"bond": 80})
 
 
 def test_mood_rerolls_only_once_stale():
     rng = random.Random(0)
     fresh = {"mood_set_at": 1000.0}
-    assert not chat_engine.should_reroll_mood(fresh, 1000.0 + 60, rng=rng)
-    assert chat_engine.should_reroll_mood(fresh, 1000.0 + 48 * 3600, rng=rng)
+    assert not persona.should_reroll_mood(fresh, 1000.0 + 60, rng=rng)
+    assert persona.should_reroll_mood(fresh, 1000.0 + 48 * 3600, rng=rng)
 
 
 def test_mood_rerolls_when_never_set():
-    assert chat_engine.should_reroll_mood({"mood_set_at": None}, 5.0, rng=random.Random(0))
+    assert persona.should_reroll_mood({"mood_set_at": None}, 5.0, rng=random.Random(0))
 
 
 # --- facts: the accumulating half of memory reaching the prompt -------------
@@ -309,14 +310,14 @@ def test_facts_reach_the_prompt_as_separate_lines():
 def test_the_facts_header_is_absent_when_there_are_none():
     p = _prompt(facts=[])
     assert "WHAT YOU KNOW ABOUT THEM" not in p
-    assert chat_engine.FACTS_RULE not in p
+    assert persona.FACTS_RULE not in p
 
 
 def test_the_kid_is_told_to_use_the_facts_not_just_hold_them():
     """Knowing things about someone and never acting on it is the same as not
     knowing them -- the old block was handed over bare."""
     p = _prompt(facts=["hates their job"])
-    assert chat_engine.FACTS_RULE in p
+    assert persona.FACTS_RULE in p
     low = p.lower()
     assert "act like you were listening" in low
     assert "never list them back" in low          # reference, don't recite
@@ -329,14 +330,14 @@ def test_facts_supersede_the_notes_blob_rather_than_repeating_it():
     thing twice under two rules that pull in different directions."""
     p = _prompt(state={"notes": "their name is walter"}, facts=["their name is walter"])
     assert p.count("their name is walter") == 1
-    assert chat_engine.NOTES_RULE not in p
+    assert persona.NOTES_RULE not in p
 
 
 def test_a_legacy_notes_blob_still_shows_when_there_are_no_facts():
     """Chats whose notes predate the facts table must not go blank."""
     p = _prompt(state={"notes": "their name is walter"}, facts=[])
     assert "their name is walter" in p
-    assert chat_engine.NOTES_RULE in p
+    assert persona.NOTES_RULE in p
 
 
 def test_blank_facts_do_not_produce_an_empty_bullet():

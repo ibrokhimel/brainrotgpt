@@ -120,7 +120,7 @@ def test_do_reply_arms_no_ghost_ping_when_nothing_was_delivered(tmp_path, monkey
         return [burst.Piece("text", "yo")]
 
     monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     bot = _Bot(fail_with=RuntimeError("telegram blip"))
     _run(scheduler._do_reply(bot, 1, db.get_chat_state(1), 1000.0))
 
@@ -188,7 +188,7 @@ def test_a_failed_reply_is_retried_on_the_next_tick(tmp_path, monkeypatch):
         raise RuntimeError("groq 503")
 
     monkeypatch.setattr(scheduler.chat_engine, "reply", boom)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
     _run(scheduler.tick(_Ctx(_Bot())))
 
@@ -206,7 +206,7 @@ def test_a_second_failure_drops_the_reply_silently(tmp_path, monkeypatch):
         raise RuntimeError("groq 503 again")
 
     monkeypatch.setattr(scheduler.chat_engine, "reply", boom)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
     _run(scheduler.tick(_Ctx(_Bot())))
 
@@ -223,7 +223,7 @@ def test_a_retry_that_succeeds_behaves_like_an_ordinary_reply(tmp_path, monkeypa
         return [burst.Piece("text", "sorry phone died")]
 
     monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
     bot = _Bot()
     _run(scheduler.tick(_Ctx(bot)))
@@ -263,7 +263,7 @@ def test_a_delivery_failure_is_retried_like_a_generation_failure(tmp_path, monke
         return [burst.Piece("text", "yo")]
 
     monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
     _run(scheduler.tick(_Ctx(_Bot(fail_with=RuntimeError("telegram 503")))))
 
@@ -283,7 +283,7 @@ def test_a_blocked_chat_is_not_retried(tmp_path, monkeypatch):
         return [burst.Piece("text", "yo")]
 
     monkeypatch.setattr(scheduler.chat_engine, "reply", fake_reply)
-    monkeypatch.setattr(scheduler.chat_engine, "should_reroll_mood", lambda *a, **kw: False)
+    monkeypatch.setattr(scheduler.persona, "should_reroll_mood", lambda *a, **kw: False)
     monkeypatch.setattr(scheduler.config, "COLDOPEN_ENABLED", False)
     _run(scheduler.tick(_Ctx(_Bot(fail_with=Forbidden("blocked")))))
 
