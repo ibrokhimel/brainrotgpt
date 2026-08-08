@@ -63,6 +63,24 @@ GROQ_VISION_MODEL = os.getenv(
     "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
 )
 
+# --- Gemini (the one call a person actually reads) -------------------------
+# Groq answers ~14,000 requests/day at low latency and carries everything the
+# owner never reads — pings, cold opens, distillation, the daily life state.
+# Gemini's free tier is ~1,500/day at 15 RPM, which is nowhere near enough for
+# that, but it honours the prompt better, so it gets `reply` and only `reply`.
+# An empty key switches the whole feature off and routes everything to Groq.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+# 2.0-flash has no free-tier quota at all (429, limit: 0). 2.5-flash is the
+# target and is verified working on the owner's key — but a newer key gets
+# "no longer available to new users" (404), and `gemini-3-flash-preview` is the
+# drop-in that answers on those. One env var, no redeploy, and a wrong model
+# here degrades to Groq with the 404 in the log rather than to silence.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_ENABLED = _flag("GEMINI_ENABLED", True)
+# Hard deadline. A reply is due in ~12s and a Gemini timeout costs a second
+# round trip to Groq on top, so this gives up well before the budget is gone.
+GEMINI_TIMEOUT_S = _float("GEMINI_TIMEOUT_S", 8.0)
+
 # --- Generation defaults (overridable per-chat via /settings) -------------
 DEFAULT_PERSONA = os.getenv("DEFAULT_PERSONA", "random")
 DEFAULT_INTENSITY = os.getenv("DEFAULT_INTENSITY", "medium")  # mild|medium|unhinged (chaos level)

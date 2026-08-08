@@ -19,6 +19,7 @@ import budget
 import burst
 import config
 import db
+import gemini
 import guard
 import life
 import memory
@@ -194,7 +195,7 @@ def _facts_for(state: dict) -> list[str]:
     if chat_id is None:
         return []
     try:
-        return [r["fact"] for r in db.recent_facts(int(chat_id), limit=FACTS_IN_PROMPT)]
+        return [r["fact"] for r in recall.recent_facts(int(chat_id), limit=FACTS_IN_PROMPT)]
     except Exception:  # noqa: BLE001 — generation must never depend on memory
         return []
 
@@ -203,7 +204,8 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
                         vocab: list[str], sticker_emoji: list[str],
                         burst_target: int, facts: list[str] | None = None,
                         lookup: list[dict] | None = None,
-                        recalled: list[dict] | None = None) -> str:
+                        recalled: list[dict] | None = None,
+                        can_look_up: bool = False) -> str:
     mood = brainrot.mood_persona(state.get("mood"))
     bond = int(state.get("bond") or 0)
     salty = bool(state.get("salty"))
@@ -212,8 +214,15 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
     period_rule = ("end your messages with periods here. you are being cold on purpose." if cold
                    else "never end a message with a period — a period reads as angry")
 
+    # LOOKUP_RULE lands ABOVE HONESTY_RULE, and only when the tool is really
+    # offered. Live, the kid answered `what does sybau mean` straight out of
+    # HONESTY_RULE without ever calling the tool — that rule gives it a clean
+    # way to not know, so it took it. Order is the fix: find out first, and not
+    # knowing is what's left when the lookup comes back useless.
+    look_first = [search.LOOKUP_RULE, ""] if can_look_up else []
+
     parts = [IDENTITY, "", RELEVANCE_RULE, "", HOW_YOU_TEXT, f"- {period_rule}",
-             "", ADHD_RULE, "", NEVER_RULE, "", HONESTY_RULE, "",
+             "", ADHD_RULE, "", NEVER_RULE, "", *look_first, HONESTY_RULE, "",
              f"SEND ROUGHLY {burst_target} SEPARATE MESSAGE(S) THIS TURN, split by |||.",
              "", f"YOUR MOOD TODAY ({mood[0].upper()}): {mood[2]}", MOOD_RULE,
              "", f"HOW YOU FEEL ABOUT THEM: {bond_line(bond)}"]
@@ -347,7 +356,7 @@ async def _complete(messages, *, model, temperature, max_tokens, tools=None) -> 
 
 
 def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None,
-             recalled: list[dict] | None = None) -> str:
+             recalled: list[dict] | None = None, can_look_up: bool = False) -> str:
     try:
         memes = db.trend_memes_for_generation(limit=2)
         vocab = db.trend_terms_for_generation(limit=8) or rng.sample(brainrot.VOCAB, 6)
@@ -357,17 +366,19 @@ def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None,
         state, day_state=life.current(), memes=memes, vocab=vocab,
         sticker_emoji=stickers.available_emoji(), burst_target=target,
         facts=_facts_for(state), lookup=lookup, recalled=recalled,
+        can_look_up=can_look_up,
     )
 
 
 async def _generate(system: str, user: str, *, model, temperature, max_tokens,
-                    max_msgs: int, tools=None, run_tool=None) -> list[burst.Piece]:
+                    max_msgs: int, tools=None, run_tool=None, complete=None) -> list[burst.Piece]:
     """Generate a burst, optionally letting the model use one tool first.
 
     `tools` and `run_tool` go together: the tool schemas to offer, and an async
     callable taking the ToolCall, running it, and returning the system prompt to
     generate from. Pass neither (pings, cold opens — neither is answering a
-    question) and the model never sees a tool.
+    question) and the model never sees a tool. `complete` is the provider seam —
+    None is Groq, and `reply` hands in gemini.first so Gemini takes that one call.
 
     The whole path is inside the try on purpose. burst.parse runs regexes over
     untrusted model output and the tool round parses JSON off the wire, so both
@@ -377,11 +388,11 @@ async def _generate(system: str, user: str, *, model, temperature, max_tokens,
     def msgs(sys_prompt):
         return [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
 
+    call = complete or _complete  # resolved here, not defaulted in the signature, so patching _complete still lands
     try:
-        out = await _complete(msgs(system), model=model, temperature=temperature,
-                              max_tokens=max_tokens,
-                              tools=tools if run_tool else None)
-        if isinstance(out, ToolCall):
+        out = await call(msgs(system), model=model, temperature=temperature,
+                         max_tokens=max_tokens, tools=tools if run_tool else None)
+        if not isinstance(out, str):
             # At most one tool call per reply: the second round is offered no
             # tools, so there is no chain to run away with and no loop to bound.
             # Both tools already swallow their own failures, but they are caught
@@ -393,8 +404,7 @@ async def _generate(system: str, user: str, *, model, temperature, max_tokens,
             except Exception as e:  # noqa: BLE001
                 logger.warning("tool %r blew up for %r: %s", out.name, out.query, e)
                 rebuilt = system
-            out = await _complete(msgs(rebuilt), model=model,
-                                  temperature=temperature, max_tokens=max_tokens)
+            out = await call(msgs(rebuilt), model=model, temperature=temperature, max_tokens=max_tokens)
         return burst.parse(out if isinstance(out, str) else "", max_msgs=max_msgs)
     except Exception as e:  # noqa: BLE001 — the kid goes quiet, it never errors at you
         logger.warning("generation failed: %s", e)
@@ -405,7 +415,10 @@ async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
     """Answer a real user. Deliberately NOT budgeted."""
     target = burst_target(state.get("chattiness") or "normal", rng=rng,
                           in_school=life.in_school_block(time.time()))
-    system = _context(state, rng=rng, target=target)
+    # can_look_up only on this first round — it is the only one that carries the
+    # tool. run_tool's rebuild below deliberately leaves it off.
+    system = _context(state, rng=rng, target=target,
+                      can_look_up=config.WEB_SEARCH_ENABLED)
     convo = guard.wrap_untrusted(memory.transcript(chat_id))
     user = f"{convo}\n\nReply as {KID_NAME}, {target} message(s), separated by |||."
 
@@ -419,12 +432,17 @@ async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
         if call.name == recall.TOOL_NAME:
             return _context(state, rng=rng, target=target,
                             recalled=db.search_messages(chat_id, call.query))
-        return _context(state, rng=rng, target=target,
-                        lookup=await search.look_up(call.query))
+        if call.name == search.TOOL_NAME:
+            return _context(state, rng=rng, target=target,
+                            lookup=await search.look_up(call.query))
+        # Every tool is matched by name, and an unrecognised one changes nothing
+        # rather than falling through to whichever branch happens to be last —
+        # otherwise a third tool added without a branch would silently run a web
+        # search for it.
+        return system
 
-    return await _generate(system, user, model=config.GROQ_MODEL, temperature=1.05,
-                           max_tokens=400, max_msgs=5,
-                           tools=tools or None, run_tool=run_tool if tools else None)
+    return await _generate(system, user, model=config.GROQ_MODEL, temperature=1.05, max_tokens=400, max_msgs=5,
+                           tools=tools or None, run_tool=run_tool if tools else None, complete=gemini.first(_complete))
 
 
 _PING_ENERGY = {

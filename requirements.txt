@@ -1,6 +1,7 @@
 # Tested with the versions noted in comments; floors keep installs reproducible.
 python-telegram-bot[job-queue]>=21.6,<23   # tested 22.7
 groq>=0.13.0                                # tested 1.4.0
+google-genai>=2.0.0                         # tested 2.17.0 (gemini, replies only)
 python-dotenv>=1.0.0                        # tested 1.2.2
 pillow>=10.0.0                              # tested 12.2.0 (share cards; optional)
 ddgs>=9.0.0                                 # tested 9.14.4 (web lookup; no API key)
