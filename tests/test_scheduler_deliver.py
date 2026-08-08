@@ -128,6 +128,44 @@ def test_do_reply_arms_no_ghost_ping_when_nothing_was_delivered(tmp_path, monkey
     assert state["next_action_kind"] != "ping"
 
 
+# --- Fix 4: the ghost ladder's bond penalty is graduated ---------------------
+
+def _ping_once(monkeypatch, chat_id, stage):
+    async def fake_ping(chat_id, state, stage, *, rng):
+        return [burst.Piece("text", "u there")]
+
+    monkeypatch.setattr(scheduler.chat_engine, "ping", fake_ping)
+    state = db.update_chat_state(chat_id, ping_stage=stage)
+    _run(scheduler._do_ping(_Bot(), chat_id, state, 1000.0, "2026-08-07"))
+    return db.get_chat_state(chat_id)["bond"]
+
+
+def test_the_first_unanswered_ping_is_only_a_light_bond_hit(tmp_path, monkeypatch):
+    """Twenty-two minutes is not ghosting. A flat -10 per rung meant the owner
+    replied after 22 minutes, took two rungs, and sat at bond -18 -- drifting
+    toward the annoyed register (bond <= -20) for ordinary human latency."""
+    _fresh(tmp_path)
+    assert _ping_once(monkeypatch, 1, stage=1) == -3
+
+
+def test_later_rungs_still_cost_the_full_penalty(tmp_path, monkeypatch):
+    """Graduated, not softened: someone who genuinely disappears for days must
+    still land where the spec intended."""
+    _fresh(tmp_path)
+    assert _ping_once(monkeypatch, 2, stage=2) == scheduler.BOND_GHOST_STAGE
+    _fresh(tmp_path)
+    assert _ping_once(monkeypatch, 3, stage=4) == scheduler.BOND_GHOST_STAGE
+
+
+def test_giving_up_still_costs_the_full_25(tmp_path, monkeypatch):
+    """BOND_GAVE_UP is unchanged -- the ladder running out is a real verdict."""
+    _fresh(tmp_path)
+    assert scheduler.BOND_GAVE_UP == -25
+    bond = _ping_once(monkeypatch, 4, stage=scheduler.ghost.FINAL_STAGE)
+    assert bond == scheduler.BOND_GHOST_STAGE + scheduler.BOND_GAVE_UP
+    assert db.get_chat_state(4)["gave_up"] == 1
+
+
 # --- I3: spec 12's "retry once on the next tick" ----------------------------
 
 class _Ctx:

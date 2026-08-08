@@ -44,8 +44,24 @@ _rng = random.Random()
 # feels progressively less warm about it. apply_bond's per-message deltas
 # live in bot.py (the intake side); these live here because _do_ping is the
 # only thing that applies them.
-BOND_GHOST_STAGE = -10   # bond hit for every unanswered ping
-BOND_GAVE_UP = -25       # bond hit when the ladder is exhausted and the kid gives up
+BOND_GHOST_STAGE = -10       # bond hit per unanswered ping, from the second rung on
+BOND_GHOST_STAGE_FIRST = -3  # ...but the first rung is only a nudge
+BOND_GAVE_UP = -25           # bond hit when the ladder is exhausted and the kid gives up
+
+
+def bond_penalty(stage: int) -> int:
+    """What an unanswered ping at this rung costs.
+
+    A flat -10 per rung punished ordinary human latency as if it were ghosting:
+    the owner replied after 22 minutes, took two rungs on the way, and sat at
+    bond -18 — three points from the annoyed register (chat_engine's bond <=
+    -20), which makes the kid colder and shorter with someone who did nothing
+    wrong. Stage 1 fires 8-25 minutes after the kid's own message, so it must
+    be cheap. From stage 2 (an hour or more) the full penalty applies, and
+    someone who genuinely disappears for days still lands where the spec
+    intended.
+    """
+    return BOND_GHOST_STAGE_FIRST if stage <= 1 else BOND_GHOST_STAGE
 
 # Spec §12: a Groq failure during a reply job is retried once on the next tick,
 # then dropped silently. The retry is encoded in next_action_kind rather than a
@@ -235,7 +251,7 @@ async def _do_ping(bot_obj, chat_id: int, state: dict, now: float, today: str):
     pieces = await chat_engine.ping(chat_id, state, stage, rng=_rng)
     await deliver(bot_obj, chat_id, pieces, state)
     used = (int(state["pings_today"] or 0) + 1) if state["pings_day"] == today else 1
-    bond = max(-100, int(state["bond"] or 0) + BOND_GHOST_STAGE)
+    bond = max(-100, int(state["bond"] or 0) + bond_penalty(stage))
     fire_at, new_stage = ghost.next_ping(stage, time.time(), rng=_rng,
                                          chattiness=state["chattiness"])
     if fire_at is None:
