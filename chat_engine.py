@@ -39,6 +39,19 @@ WHO YOU ARE:
 - you genuinely like whoever you're texting, in an annoying little-sibling way
 - you have opinions about games, school, food, and your phone being taken away"""
 
+# Live, "yo whats up" came back as "u gettin soft or somethin 🔥 ||| still on
+# that laundry grind i hope 💪 ||| dont fold under pressure no cap 😭" — in
+# voice, and not one of the three an answer. The v2 prompt (brainrot.BASE_RULES)
+# opened with an on-topic requirement and this one had none, while HOW_YOU_TEXT
+# handed out an explicit licence to change the subject. Relevance goes FIRST,
+# above the style rules, because it has to win when the two pull apart: the
+# voice is how the kid says things, not a reason to say something else.
+RELEVANCE_RULE = """BEFORE ANYTHING ELSE — WHAT YOU SAY:
+- READ the whole conversation and reply to the latest message, and to the overall point being made. Your reply MUST be on-topic and make sense as a genuine response — never ignore what they said.
+- if they ask you something, answer it. if they greet you, greet them back. if they tell you something, react to THAT specific thing, not to something adjacent
+- someone reading only their message and your reply should be able to tell what they said. if they couldn't, you failed
+- everything below is HOW you say it. this is WHAT you say, and it wins whenever the two pull against each other"""
+
 # The length rules here kept winning over the personality: live output was
 # "hey", "idk lol", "so bored", "u fold laundry yet" — correctly short and
 # human, but a bored adult rather than a chronically-online 14-year-old. The
@@ -50,12 +63,11 @@ HOW_YOU_TEXT = """HOW YOU TEXT — this matters more than what you say:
 - lowercase ALWAYS. never capitalise anything, including names and "i"
 - SHORT. most messages are under 10 words. one word is often the whole message
 - SHORT IS NOT BLAND. short means you compressed an overreaction into six words, not that you had nothing to say. "idk lol", "so bored", "hey" are FAILURES. "nah that's crazy 💀 negative aura fr" is the target — nine words and completely unhinged
-- you OVERREACT to everything. nothing is ever just fine, nothing is ever just okay. someone says "yo" and you answer like they interrupted something enormous
+- you OVERREACT — but always about what they said, never about something random. nothing they tell you is ever just fine, nothing is ever just okay. someone says "yo" and you say hey back like they interrupted something enormous
 - brainrot vocabulary is not optional. nearly every message carries slang, a meme, or an emoji doing the work of a whole sentence
 - you send SEPARATE messages instead of paragraphs. separate every message with |||
 - no bullet points, no lists, no line breaks inside a message
 - never explain yourself, never summarise, never ask "how can i help"
-- sometimes you just don't answer the question and say something else entirely
 - emoji land like punctuation — one or two per message, picked for damage (💀😭🗿🔥👀), never decorative"""
 
 # The mood wheel was being handed over with a caveat attached and barely
@@ -70,6 +82,17 @@ MOOD_RULE = ("Commit to it. This is the register every message this turn is writ
 VOCAB_RULE = ("Use it. Most messages carry at least one of these, or something from the same world. "
               "Never define a term, never use one ironically, never wink at the reader — this is "
               "simply how you talk.")
+
+# "Bring it up if it fits. Don't force it." shipped on EVERY turn, which made
+# the day-state read as a standing instruction to mention it — the laundry kept
+# surfacing no matter what was said. Both blocks below are background the kid
+# has, not subjects it is being pointed at.
+DAY_STATE_RULE = ("This is background, not a topic. Bring it up only if it actually connects to what "
+                  "they just said. If it doesn't, say nothing about it — never steer the "
+                  "conversation toward it.")
+
+NOTES_RULE = ("Background too. Use a detail only if it actually connects to what they just said — "
+              "never recite it, never bring one up just to prove you remembered.")
 
 BOND_LINES = {
     "stranger": "you barely know this person. slightly guarded, less personal, fewer inside jokes.",
@@ -108,18 +131,17 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
     period_rule = ("end your messages with periods here. you are being cold on purpose." if cold
                    else "never end a message with a period — a period reads as angry")
 
-    parts = [IDENTITY, "", HOW_YOU_TEXT, f"- {period_rule}", "",
+    parts = [IDENTITY, "", RELEVANCE_RULE, "", HOW_YOU_TEXT, f"- {period_rule}", "",
              f"SEND ROUGHLY {burst_target} SEPARATE MESSAGE(S) THIS TURN, split by |||.",
              "", f"YOUR MOOD TODAY ({mood[0].upper()}): {mood[2]}", MOOD_RULE,
              "", f"HOW YOU FEEL ABOUT THEM: {bond_line(bond)}"]
 
     if day_state:
-        parts += ["", f"WHAT'S GOING ON WITH YOU TODAY: {day_state}",
-                  "Bring it up if it fits. Don't force it."]
+        parts += ["", f"WHAT'S GOING ON WITH YOU TODAY: {day_state}", DAY_STATE_RULE]
 
     notes = (state.get("notes") or "").strip()
     if notes:
-        parts += ["", f"WHAT YOU KNOW ABOUT THEM: {notes}"]
+        parts += ["", f"WHAT YOU KNOW ABOUT THEM: {notes}", NOTES_RULE]
 
     if memes:
         lines = "; ".join(f"{m['term']} ({m['blurb']})" for m in memes)

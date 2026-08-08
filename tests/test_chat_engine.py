@@ -101,6 +101,65 @@ def test_the_format_rules_survive_the_rebalance():
     assert "no bullet points" in p
 
 
+# --- Relevance: the kid has to answer what was actually said ----------------
+#
+# Live, the owner sent "yo whats up" and got back "u gettin soft or somethin 🔥
+# ||| still on that laundry grind i hope 💪 ||| dont fold under pressure no cap
+# 😭" -- in voice, and not one of the three an answer. The v2 prompt
+# (brainrot.BASE_RULES) opened with an explicit on-topic requirement; this one
+# had none, and HOW_YOU_TEXT actively licensed changing the subject.
+
+def test_the_prompt_requires_an_on_topic_reply():
+    p = _prompt()
+    assert chat_engine.RELEVANCE_RULE in p
+    low = p.lower()
+    assert "on-topic" in low
+    assert "never ignore what they said" in low
+
+
+def test_relevance_outranks_the_style_rules():
+    """Order is the whole point: when voice and relevance pull apart the model
+    should already have read that relevance wins."""
+    p = _prompt()
+    assert p.index(chat_engine.RELEVANCE_RULE) < p.index(chat_engine.HOW_YOU_TEXT)
+
+
+def test_the_licence_to_ignore_the_question_is_gone():
+    """HOW_YOU_TEXT used to say `sometimes you just don't answer the question
+    and say something else entirely`. That line is the direct cause of the
+    non-sequiturs and must not come back."""
+    low = _prompt(day_state="folding laundry", state={"notes": "n"}).lower()
+    assert "don't answer the question" not in low
+    assert "say something else entirely" not in low
+
+
+def test_the_overreaction_is_anchored_to_what_they_said():
+    """Keep the overreaction, drop the free-floating one -- unanchored, it
+    attaches to whatever is nearest in context (the laundry)."""
+    low = _prompt().lower()
+    assert "overreact" in low
+    assert "about what they said" in low
+
+
+def test_the_day_state_arrives_as_context_rather_than_a_nudge():
+    """`Bring it up if it fits. Don't force it.` ran on every single turn and
+    is why laundry kept surfacing regardless of the message."""
+    p = _prompt(day_state="folding laundry all day")
+    assert chat_engine.DAY_STATE_RULE in p
+    low = p.lower()
+    assert "don't force it" not in low
+    assert "only if it actually connects to what they just said" in low
+
+
+def test_the_day_state_rule_is_absent_when_there_is_no_day_state():
+    assert chat_engine.DAY_STATE_RULE not in _prompt()
+
+
+def test_the_notes_block_is_conditional_too():
+    assert chat_engine.NOTES_RULE in _prompt(state={"notes": "their name is walter"})
+    assert chat_engine.NOTES_RULE not in _prompt()
+
+
 def test_bond_line_changes_across_buckets():
     low = chat_engine.bond_line(-50)
     mid = chat_engine.bond_line(5)
