@@ -88,6 +88,50 @@ def test_salty_replies_slowest():
     assert salty > normal
 
 
+# --- Fix 2: engaged replies at conversation speed ---------------------------
+
+class _FixedRNG:
+    """A stub whose uniform() picks an end of the range, so the branch bounds
+    are testable directly rather than through a seeded distribution."""
+
+    def __init__(self, end="lo", r=0.5):
+        self._end = end
+        self._r = r        # 0.5 keeps us out of the 5% genuinely-busy branch
+
+    def random(self):
+        return self._r
+
+    def uniform(self, lo, hi):
+        return lo if self._end == "lo" else hi
+
+    def choice(self, seq):
+        return seq[0]
+
+
+def test_an_engaged_reply_lands_at_conversation_speed():
+    """2-10s was slow enough that a live back-and-forth still read as a queue:
+    every turn, the other person waits out a pause that a real teenager holding
+    their phone would not take."""
+    fast = ghost.reply_delay(engaged=True, bond=0, salty=False, rng=_FixedRNG("lo"))
+    slow = ghost.reply_delay(engaged=True, bond=0, salty=False, rng=_FixedRNG("hi"))
+    assert 1 <= fast <= 2
+    assert 5 <= slow <= 7
+
+
+def test_the_cold_path_is_deliberately_unchanged():
+    """The FIRST message after a long silence should take a while -- that is
+    the signal that the kid was doing something else, and it is not the bug."""
+    fast = ghost.reply_delay(engaged=False, bond=0, salty=False, rng=_FixedRNG("lo"))
+    slow = ghost.reply_delay(engaged=False, bond=0, salty=False, rng=_FixedRNG("hi"))
+    assert (fast, slow) == (20, 90)
+
+
+def test_the_engaged_window_covers_several_minutes_of_conversation():
+    """Someone who texted you four minutes ago is still holding their phone.
+    120s classified them as a cold open and charged them the 20-90s delay."""
+    assert 5 * 60 <= ghost.ENGAGED_WINDOW_S <= 15 * 60
+
+
 def test_schedule_reply_at_defers_a_3am_message_to_the_morning():
     out = ghost.schedule_reply_at(_at(3), engaged=True, bond=0, salty=False,
                                   rng=random.Random(0))

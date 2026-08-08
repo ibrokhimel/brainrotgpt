@@ -206,7 +206,7 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state, now, bond=apply_bond(state, text), engaged=True, schedule=False))
             return
 
-    engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < 120)
+    engaged = bool(state["last_kid_ts"] and now - state["last_kid_ts"] < ghost.ENGAGED_WINDOW_S)
     scheduler.arm_fast_reply(context.bot, chat_id, db.update_chat_state(
         chat_id, **intake_fields(state, now, bond=apply_bond(state, text), engaged=engaged)))
 

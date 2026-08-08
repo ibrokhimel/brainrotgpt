@@ -179,6 +179,47 @@ def test_reaction_chance_miss_falls_through_to_a_scheduled_reply(tmp_path, monke
     assert state["next_action_kind"] == "reply"
 
 
+# --- Fix 2: how long a chat counts as engaged -------------------------------
+
+def _engaged_spy(monkeypatch):
+    """Capture the `engaged` flag bot.on_user_message hands to ghost."""
+    seen = {}
+
+    def spy(now, *, engaged, bond, salty, rng, in_school=False):
+        seen.update(engaged=engaged)
+        return now + 3600       # far out, so no in-process delivery is armed
+
+    monkeypatch.setattr(bot.ghost, "schedule_reply_at", spy)
+    monkeypatch.setattr(bot._rng, "random", lambda: 1.0)     # skip the reaction branch
+    return seen
+
+
+def test_a_chat_is_still_engaged_five_minutes_after_the_kid_spoke(tmp_path, monkeypatch):
+    """A 120-second window classified someone who had just been texting as a
+    cold open and charged them the 20-90s first-contact delay. In a real
+    back-and-forth the other person is still holding their phone for minutes."""
+    _fresh(tmp_path)
+    seen = _engaged_spy(monkeypatch)
+    chat_id = 520
+    db.update_chat_state(chat_id, last_kid_ts=time.time() - 5 * 60)
+    msg = _FakeMessage(text="what are you up to", from_user=_FakeUser(5200))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    assert seen["engaged"] is True
+
+
+def test_a_chat_quiet_for_an_hour_is_not_engaged(tmp_path, monkeypatch):
+    """The cold path still exists — widening the window must not delete it."""
+    _fresh(tmp_path)
+    seen = _engaged_spy(monkeypatch)
+    chat_id = 521
+    db.update_chat_state(chat_id, last_kid_ts=time.time() - 3600)
+    msg = _FakeMessage(text="you there", from_user=_FakeUser(5210))
+    _run(bot.on_user_message(_FakeUpdate(msg, chat_id), _FakeContext()))
+
+    assert seen["engaged"] is False
+
+
 # --- revival: coming back after the kid gave up -----------------------------
 
 def test_returning_user_is_not_penalised_again_for_coming_back(tmp_path, monkeypatch):

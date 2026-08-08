@@ -28,6 +28,14 @@ CHATTINESS_FACTOR = {"chill": 1.8, "normal": 1.0, "clingy": 0.55}
 # `db` and a Groq client in behind it and cost this module its purity.
 SCHOOL_DELAY_FACTOR = 2.0
 
+# How long after the kid's own last message a chat still counts as a live
+# back-and-forth. Two minutes was far too literal: someone who texted you four
+# minutes ago is still holding their phone, and treating them as first contact
+# charged an active conversation the 20-90s cold delay every few turns.
+# bot.py reads this rather than owning the number — the whole point of this
+# module is that reply timing lives in one pure place.
+ENGAGED_WINDOW_S = 8 * 60
+
 
 def is_asleep(ts: float) -> bool:
     return SLEEP_START_H <= dt.datetime.fromtimestamp(ts).hour < SLEEP_END_H
@@ -62,8 +70,13 @@ def reply_delay(*, engaged: bool, bond: int, salty: bool, rng,
     if rng.random() < 0.05:
         base = rng.uniform(3 * 60, 15 * 60)      # genuinely busy
     elif engaged:
-        base = rng.uniform(2, 10)
+        # Mid-conversation. Paired with the in-process fast path in scheduler.py
+        # this is the whole difference between a back-and-forth and a queue —
+        # on the 60s tick alone the number here barely mattered.
+        base = rng.uniform(1.5, 6)
     else:
+        # First contact after a long silence, and deliberately slow: the kid
+        # was doing something else, and the wait is what says so.
         base = rng.uniform(20, 90)
     if in_school:
         base *= SCHOOL_DELAY_FACTOR   # phone under the desk; it composes with the rest
