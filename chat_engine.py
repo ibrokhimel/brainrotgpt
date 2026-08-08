@@ -435,10 +435,8 @@ async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
         if call.name == search.TOOL_NAME:
             return _context(state, rng=rng, target=target,
                             lookup=await search.look_up(call.query))
-        # Every tool is matched by name, and an unrecognised one changes nothing
-        # rather than falling through to whichever branch happens to be last —
-        # otherwise a third tool added without a branch would silently run a web
-        # search for it.
+        # An unrecognised tool changes nothing, rather than falling through to
+        # whichever branch happens to be last and silently web-searching for it.
         return system
 
     return await _generate(system, user, model=config.GROQ_MODEL, temperature=1.05, max_tokens=400, max_msgs=5,

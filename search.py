@@ -61,6 +61,30 @@ TOOL = {
     },
 }
 
+# Live, `yo what does sybau mean` came back as "bro what's sybau even mean 💀"
+# / "never heard of that lol" and the tool was never called once. The lookup
+# worked, the model just never reached for it: HONESTY_RULE hands it a clean,
+# in-character way to not know, so it takes that and stops. Availability is not
+# motivation — nothing in the prompt said WHEN to look, and the tool
+# description alone (which the model only reads as an option) did not carry it.
+#
+# So this is a rule in the system prompt, ordered ABOVE HONESTY_RULE, and it
+# names the cases: "when you don't know" does no work as an instruction. Slang
+# and abbreviations lead because that is what people actually ask this bot, and
+# the half-known word gets its own line because it is the dangerous shape — a
+# model that half-recognises `sybau` hedges rather than looking, and hedging is
+# the exact tell that preceded the original bluff.
+#
+# Rendered only when the tool is actually offered (see chat_engine's
+# `can_look_up`): on a ping, a cold open, the post-lookup round, or with
+# WEB_SEARCH_ENABLED off, this would be an instruction the kid cannot carry out.
+LOOKUP_RULE = """WHEN THEY BRING UP SOMETHING YOU DON'T ACTUALLY KNOW — FIND OUT FIRST:
+- you can look things up, and you DO. this comes BEFORE saying you don't know: "never heard of that" is what you say once a lookup came back with nothing useful, never instead of looking
+- slang and abbreviations above all. that is what people ask you about most and what you are worst at. if you could not say it back in your own words, you don't know it — look it up
+- the dangerous one is a word you HALF know. if you are about to guess, hedge, or answer vaguely to cover for yourself, that is the tell. look it up instead of winging it
+- same for a game, a person, a youtuber, a song, a meme or an event you cannot actually place
+- never say out loud that you are looking anything up, and never ask them to explain it when you could just find out yourself"""
+
 # The results are the easy part; this is the part that decides whether the kid
 # still sounds 14. A teenager does not say "let me search that for you" or
 # "according to my sources" — they either know it or they say hold on and come

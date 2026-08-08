@@ -204,3 +204,52 @@ def test_the_tool_is_withheld_when_web_search_is_switched_off(tmp_path, monkeypa
     # The switch withholds THIS tool; `remember` has its own and is unaffected.
     names = [t["function"]["name"] for t in calls[0]["tools"] or []]
     assert search.TOOL_NAME not in names
+
+
+# --- The trigger: availability is not motivation ----------------------------
+
+def test_the_kid_is_told_to_look_it_up_before_it_is_told_it_can_not_know(tmp_path, monkeypatch):
+    """The live failure was the tool being offered but unmotivated.
+
+    `yo what does sybau mean` -> "bro what's sybau even mean 💀 / never heard
+    of that lol", and the tool was never called. HONESTY_RULE hands the model a
+    clean, in-character way to not know, so it takes it and stops there.
+    Something has to say look FIRST, and it has to outrank the rule it is
+    short-circuiting — so the ORDER is asserted, not just the presence.
+    """
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, "yo")
+    db.add_message(1, "user", "yo what does sybau mean")
+    _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+
+    system = calls[0]["messages"][0]["content"]
+    assert search.LOOKUP_RULE in system
+    assert system.index(search.LOOKUP_RULE) < system.index("WHEN YOU DON'T KNOW SOMETHING")
+
+
+def test_the_second_round_is_not_told_to_look_it_up_again(tmp_path, monkeypatch):
+    """It has no tool on the second round, so "look it up" would be an
+    instruction it cannot carry out. JUDGE_IT and HONESTY_RULE cover it."""
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, chat_engine.ToolCall("sybau"), "oh that")
+    _patch_search(monkeypatch, SYBAU)
+    _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+
+    assert search.LOOKUP_RULE not in calls[1]["messages"][0]["content"]
+
+
+def test_the_trigger_is_withheld_when_web_search_is_switched_off(tmp_path, monkeypatch):
+    """No tool means the instruction would be a lie. HONESTY_RULE alone then."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
+    calls = _patch_groq(monkeypatch, "yo")
+    _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+    assert search.LOOKUP_RULE not in calls[0]["messages"][0]["content"]
+
+
+def test_pings_and_cold_opens_are_not_told_to_look_things_up(tmp_path, monkeypatch):
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, "yo")
+    _run(chat_engine.ping(1, db.get_chat_state(1), 1, rng=random.Random(0)))
+    _run(chat_engine.cold_open(1, db.get_chat_state(1), rng=random.Random(0)))
+    assert all(search.LOOKUP_RULE not in c["messages"][0]["content"] for c in calls)

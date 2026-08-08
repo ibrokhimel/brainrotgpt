@@ -111,6 +111,25 @@ def test_prompt_block_tells_the_kid_to_throw_away_results_that_dont_answer():
     assert "never heard of that" in low
 
 
+def test_the_lookup_trigger_is_concrete_about_what_warrants_one():
+    """Live, `yo what does sybau mean` got "bro what's sybau even mean 💀 /
+    never heard of that lol" and the tool was never called. HONESTY_RULE gave
+    the model a clean in-character way out and it took it; nothing told it to
+    look first. "when you don't know" does no work as an instruction, so the
+    trigger names the cases — slang above all, and the half-known word, which
+    is the shape `sybau` actually had.
+    """
+    low = search.LOOKUP_RULE.lower()
+    assert "slang" in low and "abbreviation" in low
+    assert "half" in low                       # the word it THINKS it knows
+    for hedge in ("guess", "hedge", "vaguely"):
+        assert hedge in low, hedge
+    # and it must beat the honesty rule to the punch, explicitly
+    assert "before" in low
+    # without ever saying it out loud
+    assert "never say out loud" in low
+
+
 def test_prompt_block_neutralises_fence_markers_in_untrusted_results():
     """Search results are attacker-controllable text. A result must not be able
     to close the fence and start issuing instructions."""
