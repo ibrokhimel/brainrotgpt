@@ -87,11 +87,25 @@ separate one-off generator, not the kid, and doesn't share his memory or bond.
    (or use one you already own).
 2. Open the pack and copy its share link — it looks like
    `t.me/addstickers/<name>` — and take just the `<name>` part.
-3. Put that in `STICKER_PACK_NAME` in `.env`.
+3. Put that in `STICKER_PACK_NAME` in `.env` for the starting pack.
 4. Each sticker already carries its own emoji in Telegram (that's how the
    model picks one to send) — no manual tagging needed.
-5. The pack is **re-read once a day**, so adding new stickers to it in
+5. The packs are **re-read once a day**, so adding new stickers to one in
    Telegram makes them available to the kid without a redeploy.
+
+You can run several packs at once — they merge into a single emoji index, so
+the kid picks by what a sticker means, never by which pack it came from. From
+the bot, as the owner:
+
+| Command | What it does |
+|---|---|
+| `/stickers` | list the packs with their counts, and offer to add one |
+| `/stickers add <name or link>` | add a pack, keeping the others |
+| `/stickers remove <name>` | drop one pack, keeping the others |
+| `/stickers off` | clear them all |
+
+Sending the bot a sticker just after `/stickers` adds the pack it came from —
+no name to copy. A pack that fails to load is skipped and the rest still load.
 
 ## Run with Docker
 ```bash

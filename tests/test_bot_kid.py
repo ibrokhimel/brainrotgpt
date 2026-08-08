@@ -600,5 +600,5 @@ def test_sticker_capture_bypasses_conversation_intake_when_owner_and_pending(tmp
 
     assert db.recent_messages(chat_id) == []             # not treated as conversation
     assert db.get_chat_state(chat_id)["next_action_at"] is None
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "ownerpack"
+    assert stickers.pack_names() == ["ownerpack"]
     assert not stickers.capture_pending()

@@ -82,6 +82,20 @@ class FakeBot:
         return FakeSet(self._items)
 
 
+class MultiPackBot:
+    """Distinct packs by name; an unknown name raises the way Telegram would."""
+
+    def __init__(self, packs):
+        self._packs = packs
+        self.requested = []
+
+    async def get_sticker_set(self, name):
+        self.requested.append(name)
+        if name not in self._packs:
+            raise RuntimeError(f"pack {name} not found")
+        return FakeSet(self._packs[name])
+
+
 class _FakeContext:
     def __init__(self, args=None, bot_obj=None):
         self.args = args or []
@@ -110,7 +124,7 @@ def test_setting_a_valid_pack_stores_it_and_reloads(monkeypatch):
 
     _run(commands.cmd_stickers(update, ctx))
 
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "mypack"
+    assert stickers.pack_names() == ["mypack"]
     assert ctx.bot.requested == "mypack"
     assert stickers.enabled()
     assert "2" in update.message.replies[0]
@@ -125,13 +139,13 @@ def test_a_t_me_addstickers_url_is_accepted_and_the_bare_name_extracted(monkeypa
 
     _run(commands.cmd_stickers(update, ctx))
 
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "mypack"
+    assert stickers.pack_names() == ["mypack"]
     assert ctx.bot.requested == "mypack"
 
 
 def test_off_disables_stickers(monkeypatch):
     _owner_only(monkeypatch)
-    db.set_kid_state(stickers.STICKER_PACK_KEY, "mypack")
+    stickers.add_pack("mypack")
     _run(stickers.load(FakeBot([("a", "💀")])))
     assert stickers.enabled()
 
@@ -140,7 +154,7 @@ def test_off_disables_stickers(monkeypatch):
     _run(commands.cmd_stickers(update, ctx))
 
     assert not stickers.enabled()
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == ""
+    assert stickers.pack_names() == []
 
 
 def test_a_pack_that_fails_to_load_reports_failure_and_leaves_stickers_disabled(monkeypatch):
@@ -157,7 +171,7 @@ def test_a_pack_that_fails_to_load_reports_failure_and_leaves_stickers_disabled(
 
 def test_report_shows_current_pack_count_and_emoji(monkeypatch):
     _owner_only(monkeypatch)
-    db.set_kid_state(stickers.STICKER_PACK_KEY, "mypack")
+    stickers.add_pack("mypack")
     _run(stickers.load(FakeBot([("a", "💀"), ("b", "💀"), ("c", "🗿")])))
 
     update = _FakeUpdate(OWNER)
@@ -192,6 +206,131 @@ def test_no_arg_report_arms_the_capture_and_prompts_for_a_sticker(monkeypatch):
     assert "sticker" in update.message.replies[0].lower()
 
 
+# --- /stickers add · remove: several packs at once --------------------------
+
+def _cmd(monkeypatch, args, bot_obj):
+    _owner_only(monkeypatch)
+    update = _FakeUpdate(OWNER)
+    ctx = _FakeContext(args=args, bot_obj=bot_obj)
+    _run(commands.cmd_stickers(update, ctx))
+    return update.message.replies[0]
+
+
+def test_add_appends_to_the_list_rather_than_replacing_it(monkeypatch):
+    stickers.add_pack("one")
+    bot = MultiPackBot({"one": [("a", "💀")], "two": [("c", "🔥")]})
+
+    reply = _cmd(monkeypatch, ["add", "two"], bot)
+
+    assert stickers.pack_names() == ["one", "two"]
+    assert set(stickers.available_emoji()) == {"💀", "🔥"}
+    assert "two" in reply
+
+
+def test_add_accepts_a_t_me_link_too(monkeypatch):
+    _cmd(monkeypatch, ["add", "https://t.me/addstickers/two"],
+         MultiPackBot({"two": [("c", "🔥")]}))
+    assert stickers.pack_names() == ["two"]
+
+
+def test_adding_a_pack_already_in_the_list_says_so_instead_of_duplicating(monkeypatch):
+    stickers.add_pack("one")
+    _run(stickers.load(MultiPackBot({"one": [("a", "💀")]})))
+
+    reply = _cmd(monkeypatch, ["add", "one"], MultiPackBot({"one": [("a", "💀")]}))
+
+    assert stickers.pack_names() == ["one"]
+    assert "already" in reply.lower()
+
+
+def test_a_pack_that_fails_to_load_is_not_left_in_the_list(monkeypatch):
+    """A name that 404s would otherwise sit in the list forever, costing an
+    API call and a warning on every reload."""
+    stickers.add_pack("one")
+    bot = MultiPackBot({"one": [("a", "💀")]})
+
+    reply = _cmd(monkeypatch, ["add", "nope"], bot)
+
+    assert stickers.pack_names() == ["one"]
+    assert stickers.enabled()          # the good pack survived the bad add
+    assert "couldn't" in reply.lower()
+
+
+def test_remove_drops_one_pack_and_keeps_the_rest(monkeypatch):
+    stickers.add_pack("one")
+    stickers.add_pack("two")
+    bot = MultiPackBot({"one": [("a", "💀")], "two": [("c", "🔥")]})
+    _run(stickers.load(bot))
+
+    reply = _cmd(monkeypatch, ["remove", "one"], bot)
+
+    assert stickers.pack_names() == ["two"]
+    assert stickers.available_emoji() == ["🔥"]   # reloaded without the removed pack
+    assert "one" in reply
+
+
+def test_removing_a_pack_that_is_not_configured_says_so(monkeypatch):
+    stickers.add_pack("one")
+    reply = _cmd(monkeypatch, ["remove", "nope"], MultiPackBot({"one": [("a", "💀")]}))
+    assert stickers.pack_names() == ["one"]
+    assert "nope" in reply
+
+
+def test_off_clears_every_pack(monkeypatch):
+    stickers.add_pack("one")
+    stickers.add_pack("two")
+    bot = MultiPackBot({"one": [("a", "💀")], "two": [("c", "🔥")]})
+    _run(stickers.load(bot))
+
+    _cmd(monkeypatch, ["off"], bot)
+
+    assert stickers.pack_names() == []
+    assert not stickers.enabled()
+
+
+def test_the_report_lists_every_pack_with_its_own_count(monkeypatch):
+    stickers.add_pack("one")
+    stickers.add_pack("two")
+    _run(stickers.load(MultiPackBot({"one": [("a", "💀"), ("b", "🗿")], "two": [("c", "🔥")]})))
+
+    reply = _cmd(monkeypatch, [], MultiPackBot({}))
+
+    assert "one" in reply and "two" in reply
+    assert "3" in reply                       # merged total
+    assert stickers.capture_pending()         # the add-by-sticker flow stays armed
+
+
+def test_capture_adds_to_the_existing_packs_rather_than_replacing_them(monkeypatch):
+    _owner_only(monkeypatch)
+    stickers.add_pack("one")
+    stickers.arm_capture()
+    update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name="two"))
+    ctx = _FakeContext(bot_obj=MultiPackBot({"one": [("a", "💀")], "two": [("c", "🔥")]}))
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is True
+    assert stickers.pack_names() == ["one", "two"]
+    assert set(stickers.available_emoji()) == {"💀", "🔥"}
+    assert not stickers.capture_pending()
+
+
+def test_capturing_a_pack_already_in_the_list_says_so_and_disarms(monkeypatch):
+    _owner_only(monkeypatch)
+    stickers.add_pack("one")
+    _run(stickers.load(MultiPackBot({"one": [("a", "💀")]})))
+    stickers.arm_capture()
+    update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name="one"))
+    ctx = _FakeContext(bot_obj=MultiPackBot({"one": [("a", "💀")]}))
+
+    handled = _run(commands.try_capture_sticker(update, ctx))
+
+    assert handled is True
+    assert stickers.pack_names() == ["one"]
+    assert "already" in update.message.replies[0].lower()
+    assert not stickers.capture_pending()   # nothing left to wait for, it's in
+
+
 # --- Sticker capture: reading the pack off a sticker the owner sends -------
 
 def test_non_owner_sticker_is_not_captured_even_with_a_pending_flag(monkeypatch):
@@ -203,7 +342,7 @@ def test_non_owner_sticker_is_not_captured_even_with_a_pending_flag(monkeypatch)
     handled = _run(commands.try_capture_sticker(update, ctx))
 
     assert handled is False
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == ""  # unchanged
+    assert stickers.pack_names() == []  # unchanged
     assert ctx.bot.requested is None
     assert stickers.capture_pending()  # still armed for the real owner
 
@@ -217,7 +356,7 @@ def test_capture_stores_the_pack_and_clears_the_flag(monkeypatch):
     handled = _run(commands.try_capture_sticker(update, ctx))
 
     assert handled is True
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "ownerpack"
+    assert stickers.pack_names() == ["ownerpack"]
     assert ctx.bot.requested == "ownerpack"
     assert not stickers.capture_pending()
     assert stickers.enabled()
@@ -237,7 +376,7 @@ def test_an_expired_flag_does_not_capture(monkeypatch):
     handled = _run(commands.try_capture_sticker(update, ctx))
 
     assert handled is False
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == ""  # unchanged
+    assert stickers.pack_names() == []  # unchanged
     assert ctx.bot.requested is None  # never even asked Telegram
 
 
@@ -246,7 +385,7 @@ def test_a_sticker_with_no_set_name_is_handled_without_changing_the_current_pack
     to send a different sticker, and re-typing /stickers is friction the
     owner shouldn't need at exactly the moment they're already confused."""
     _owner_only(monkeypatch)
-    db.set_kid_state(stickers.STICKER_PACK_KEY, "existing")
+    stickers.add_pack("existing")
     stickers.arm_capture()
     update = _FakeUpdate(OWNER, sticker=FakeStickerObj(set_name=None))
     ctx = _FakeContext(bot_obj=FakeBot())
@@ -254,7 +393,7 @@ def test_a_sticker_with_no_set_name_is_handled_without_changing_the_current_pack
     handled = _run(commands.try_capture_sticker(update, ctx))
 
     assert handled is True  # consumed this attempt, just not a load
-    assert db.get_kid_state(stickers.STICKER_PACK_KEY) == "existing"
+    assert stickers.pack_names() == ["existing"]
     assert ctx.bot.requested is None
     assert stickers.capture_pending()  # still waiting for a valid one
     assert "another" in update.message.replies[0].lower() or "try" in update.message.replies[0].lower()

@@ -189,13 +189,58 @@ def _extract_pack_name(raw: str) -> str:
     return raw.split("?", 1)[0].strip("/ \t")
 
 
-async def cmd_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner-only sticker pack control: /stickers [<pack_name_or_link> | off].
+STICKERS_USAGE = "/stickers add <name or link> · remove <name> · off"
+STICKERS_PROMPT = "send me a sticker from a pack and i'll add it 🗿"
 
-    Stickers are sent from the owner's own Telegram pack. This lets the owner
-    swap it at runtime instead of editing STICKER_PACK_NAME in .env and
-    restarting — see stickers.load() for the kid_state-over-config resolution
-    order this writes into.
+
+def _packs_report() -> str:
+    """The pack list, with what each one actually contributed to the index."""
+    s = stickers.status()
+    if not s["packs"]:
+        return "stickers are off 🚫"
+    lines = [f"{len(s['packs'])} pack(s) · {s['count']} sticker(s) · {s['emoji_count']} emoji\n"]
+    lines += [f"• {name} — {count}" for name, count in s["packs"]]
+    lines.append(f"\n{STICKERS_USAGE}")
+    return "\n".join(lines)
+
+
+async def _add_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str) -> None:
+    """Add one pack to the list and reload. Shared by the typed and the
+    send-me-a-sticker routes, so they can't drift apart."""
+    pack_name = _extract_pack_name(raw)
+    if not pack_name:
+        await update.message.reply_text(f"usage: {STICKERS_USAGE}")
+        return
+    if not stickers.add_pack(pack_name):
+        await update.message.reply_text(
+            f"{pack_name} is already in there 🤷 — /stickers to see them all"
+        )
+        return
+
+    await stickers.load(context.bot)
+    count = stickers.pack_count(pack_name)
+    if not count:
+        # A name that 404s would otherwise sit in the list forever, costing an
+        # API call and a warning on every reload. The other packs are already
+        # loaded — this one contributed nothing, so dropping it needs no reload.
+        stickers.remove_pack(pack_name)
+        await update.message.reply_text(
+            f"couldn't load pack {pack_name} 😭 (bad name, or it's empty) — not added"
+        )
+        return
+    await update.message.reply_text(
+        f"pack added ✅ {pack_name} — {count} sticker(s)\n\n{_packs_report()}"
+    )
+
+
+async def cmd_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only sticker pack control: /stickers [add <name|link> | remove <name> | off].
+
+    Stickers are sent from the owner's own Telegram packs, several at a time —
+    they merge into one emoji index, so adding a pack widens what the kid can
+    send rather than swapping it out. This lets the owner curate at runtime
+    instead of editing STICKER_PACK_NAME in .env and restarting; see
+    stickers.pack_names() for the kid_state-over-config resolution order.
     """
     if not guard.is_owner(update.effective_user.id):
         await update.message.reply_text("owner only 🔒")
@@ -206,51 +251,45 @@ async def cmd_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Arm the capture window every time — the owner can just send a
         # sticker from the pack next instead of typing/pasting a name.
         stickers.arm_capture()
-        prompt = "send me a sticker from the pack and i'll read it 🗿"
-        s = stickers.status()
-        if not s["pack_name"]:
-            await update.message.reply_text(f"stickers are off 🚫\n{prompt}")
-            return
-        await update.message.reply_text(
-            f"pack: {s['pack_name']}\n{s['count']} sticker(s) · {s['emoji_count']} emoji\n\n{prompt}"
-        )
+        await update.message.reply_text(f"{_packs_report()}\n\n{STICKERS_PROMPT}")
         return
 
     stickers.disarm_capture()  # a typed name/off resolves the pending prompt
+    sub = args[0].lower()
+    rest = args[1] if len(args) > 1 else ""
 
-    if args[0].lower() == "off":
-        db.set_kid_state(stickers.STICKER_PACK_KEY, "")
+    if sub == "off":
+        stickers.clear_packs()
         await stickers.load(context.bot)
         await update.message.reply_text("stickers off 🚫")
         return
 
-    pack_name = _extract_pack_name(args[0])
-    if not pack_name:
-        await update.message.reply_text("usage: /stickers [<pack_name_or_link> | off]")
+    if sub in ("remove", "rm", "del", "delete"):
+        pack_name = _extract_pack_name(rest)
+        if not stickers.remove_pack(pack_name):
+            await update.message.reply_text(f"{pack_name or '?'} isn't in there 🤷\n{STICKERS_USAGE}")
+            return
+        await stickers.load(context.bot)
+        await update.message.reply_text(f"removed 🗑 {pack_name}\n\n{_packs_report()}")
         return
 
-    db.set_kid_state(stickers.STICKER_PACK_KEY, pack_name)
-    count = await stickers.load(context.bot)
-    if count:
-        await update.message.reply_text(f"pack set ✅ {pack_name} — loaded {count} sticker(s)")
-    else:
-        await update.message.reply_text(
-            f"couldn't load pack {pack_name} 😭 (bad name, or it's empty) — stickers off for now"
-        )
+    # `add <name>`, and a bare `/stickers <name>` — which used to REPLACE the
+    # single pack and now appends, since there is no single pack any more.
+    await _add_pack(update, context, rest if sub == "add" else args[0])
 
 
 async def try_capture_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """If an owner-armed /stickers capture is pending and unexpired, read the
-    pack off this sticker and load it — instead of the sticker being treated
+    pack off this sticker and add it — instead of the sticker being treated
     as an ordinary message. See stickers.capture_pending() for the window.
 
-    Only a *successful* load disarms the flag. On failure (no set_name, or
-    the pack doesn't load) it stays armed so the owner can just send a
-    different sticker instead of re-typing /stickers — the CAPTURE_WINDOW_S
-    expiry is what bounds it, not a single-attempt limit. Returns whether
-    this sticker was consumed as a capture attempt; bot.on_sticker falls
-    through to ordinary intake when this returns False (not owner, or
-    nothing pending).
+    Only a *resolved* attempt disarms the flag — the pack loaded, or it was
+    already in the list. On failure (no set_name, or the pack doesn't load) it
+    stays armed so the owner can just send a different sticker instead of
+    re-typing /stickers; the CAPTURE_WINDOW_S expiry is what bounds it, not a
+    single-attempt limit. Returns whether this sticker was consumed as a
+    capture attempt; bot.on_sticker falls through to ordinary intake when this
+    returns False (not owner, or nothing pending).
     """
     msg = update.message
     user_id = msg.from_user.id if msg.from_user else 0
@@ -264,12 +303,20 @@ async def try_capture_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return True
 
-    db.set_kid_state(stickers.STICKER_PACK_KEY, set_name)
-    count = await stickers.load(context.bot)
+    if not stickers.add_pack(set_name):
+        stickers.disarm_capture()   # nothing left to wait for, it's already in
+        await update.message.reply_text(f"{set_name} is already in there 🤷\n\n{_packs_report()}")
+        return True
+
+    await stickers.load(context.bot)
+    count = stickers.pack_count(set_name)
     if count:
         stickers.disarm_capture()
-        await update.message.reply_text(f"pack set ✅ {set_name} — loaded {count} sticker(s)")
+        await update.message.reply_text(
+            f"pack added ✅ {set_name} — {count} sticker(s)\n\n{_packs_report()}"
+        )
     else:
+        stickers.remove_pack(set_name)
         await update.message.reply_text(
             f"couldn't load pack {set_name} 😭 (bad name, or it's empty) — still waiting, try another sticker"
         )
