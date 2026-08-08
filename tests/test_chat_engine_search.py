@@ -14,6 +14,7 @@ import random
 import chat_engine
 import config
 import db
+import persona
 import search
 
 
@@ -253,3 +254,63 @@ def test_pings_and_cold_opens_are_not_told_to_look_things_up(tmp_path, monkeypat
     _run(chat_engine.ping(1, db.get_chat_state(1), 1, rng=random.Random(0)))
     _run(chat_engine.cold_open(1, db.get_chat_state(1), rng=random.Random(0)))
     assert all(search.LOOKUP_RULE not in c["messages"][0]["content"] for c in calls)
+
+
+# --- The closing line vetoing every rule above it ---------------------------
+
+def test_the_closing_line_permits_a_tool_call_when_a_tool_is_offered(tmp_path, monkeypatch):
+    """The bug that made JUDGE_IT, LOOKUP_RULE and the ordering all moot.
+
+    "Output ONLY the messages, separated by |||" was correct when text was the
+    only output and silently became a veto the moment tools existed: a model
+    reads it literally and will not emit a function call under it. Live, with
+    the full prompt, Gemini answered `whats the weather in tashkent rn` by
+    TYPING "look it up" as a message and then inventing a temperature. Drop the
+    line and the same prompt calls the tool.
+
+    No stubbed test could have caught it — the provider is always faked, so what
+    a real model does with the assembled prompt is exactly what is never run.
+    The suite can only pin the wording; see the report for the live check.
+    """
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, "yo")
+    _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+
+    system = calls[0]["messages"][0]["content"]
+    assert persona.CLOSING_WITH_TOOLS in system
+    assert persona.CLOSING_STRICT not in system
+
+
+def test_the_closing_line_stays_strict_when_no_tool_is_offered(tmp_path, monkeypatch):
+    """Pings and cold opens carry no tool, and the strict line does real work
+    there against preamble and self-narration. It only loosens where it must."""
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, "yo")
+    _run(chat_engine.ping(1, db.get_chat_state(1), 1, rng=random.Random(0)))
+    _run(chat_engine.cold_open(1, db.get_chat_state(1), rng=random.Random(0)))
+    for c in calls:
+        assert persona.CLOSING_STRICT in c["messages"][0]["content"]
+        assert persona.CLOSING_WITH_TOOLS not in c["messages"][0]["content"]
+
+
+def test_the_second_round_gets_the_strict_closing_line(tmp_path, monkeypatch):
+    """It has no tools on the second round, so there is nothing to permit."""
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, chat_engine.ToolCall("sybau"), "oh that")
+    _patch_search(monkeypatch, SYBAU)
+    _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+    assert persona.CLOSING_STRICT in calls[1]["messages"][0]["content"]
+
+
+def test_every_offered_tool_is_covered_not_just_the_lookup(tmp_path, monkeypatch):
+    """`remember` was vetoed by the same line. Keying the fix off can_look_up
+    alone would have left recall's tool broken with web search switched off."""
+    _fresh(tmp_path)
+    monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
+    monkeypatch.setattr(config, "RECALL_ENABLED", True)
+    calls = _patch_groq(monkeypatch, "yo")
+    _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+
+    system = calls[0]["messages"][0]["content"]
+    assert search.LOOKUP_RULE not in system          # no web tool, so no trigger
+    assert persona.CLOSING_WITH_TOOLS in system      # but `remember` still needs the permission

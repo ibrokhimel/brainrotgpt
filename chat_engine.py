@@ -133,7 +133,8 @@ async def _complete(messages, *, model, temperature, max_tokens, tools=None) -> 
 
 
 def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None,
-             recalled: list[dict] | None = None, can_look_up: bool = False) -> str:
+             recalled: list[dict] | None = None, can_look_up: bool = False,
+             tools_offered: bool = False) -> str:
     try:
         memes = db.trend_memes_for_generation(limit=2)
         vocab = db.trend_terms_for_generation(limit=8) or rng.sample(brainrot.VOCAB, 6)
@@ -143,7 +144,7 @@ def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None,
         state, day_state=life.current(), memes=memes, vocab=vocab,
         sticker_emoji=stickers.available_emoji(), burst_target=target,
         facts=_facts_for(state), lookup=lookup, recalled=recalled,
-        can_look_up=can_look_up,
+        can_look_up=can_look_up, tools_offered=tools_offered,
     )
 
 
@@ -192,16 +193,20 @@ async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
     """Answer a real user. Deliberately NOT budgeted."""
     target = burst_target(state.get("chattiness") or "normal", rng=rng,
                           in_school=life.in_school_block(time.time()))
-    # can_look_up only on this first round — it is the only one that carries the
-    # tool. run_tool's rebuild below deliberately leaves it off.
-    system = _context(state, rng=rng, target=target,
-                      can_look_up=config.WEB_SEARCH_ENABLED)
-    convo = guard.wrap_untrusted(memory.transcript(chat_id))
-    user = f"{convo}\n\nReply as {persona.KID_NAME}, {target} message(s), separated by |||."
-
-    # Read per-reply, not at import: either switch works on a live bot.
+    # Read per-reply, not at import: either switch works on a live bot. Computed
+    # BEFORE the prompt because the prompt's closing line depends on it — "output
+    # ONLY the messages" suppresses function calling outright, so the permissive
+    # form has to go in whenever any tool is really on the table.
     tools = ([search.TOOL] if config.WEB_SEARCH_ENABLED else []) + \
             ([recall.TOOL] if config.RECALL_ENABLED else [])
+
+    # Both flags apply only to this first round — it is the only one carrying
+    # tools. run_tool's rebuild below deliberately leaves them off.
+    system = _context(state, rng=rng, target=target,
+                      can_look_up=config.WEB_SEARCH_ENABLED,
+                      tools_offered=bool(tools))
+    convo = guard.wrap_untrusted(memory.transcript(chat_id))
+    user = f"{convo}\n\nReply as {persona.KID_NAME}, {target} message(s), separated by |||."
 
     async def run_tool(call: ToolCall) -> str:
         # Rebuilt rather than patched: the block belongs inside the prompt's own
