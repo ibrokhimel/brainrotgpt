@@ -3,6 +3,7 @@ import time
 
 import db
 import memory
+import recall
 
 
 def _fresh(tmp_path):
@@ -87,7 +88,7 @@ def test_distill_stores_one_fact_per_line(tmp_path, monkeypatch):
         "their name is walter\n- hates their job\n\n2. has a kid called flynn"))
     _run(memory.distill(1, db.get_chat_state(1)))
 
-    assert [f["fact"] for f in db.recent_facts(1)] == [
+    assert [f["fact"] for f in recall.recent_facts(1)] == [
         "has a kid called flynn", "hates their job", "their name is walter"]
 
 
@@ -97,7 +98,7 @@ def test_a_repeated_fact_does_not_pile_up_across_passes(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "_ask", lambda p: _done("their name is walter"))
     for _ in range(3):
         _run(memory.distill(1, db.get_chat_state(1)))
-    assert len(db.recent_facts(1)) == 1
+    assert len(recall.recent_facts(1)) == 1
 
 
 def test_a_none_backs_off_a_few_messages_rather_than_a_whole_cycle(tmp_path, monkeypatch):
@@ -240,7 +241,7 @@ def test_facts_still_come_from_the_users_lines_in_the_same_transcript(tmp_path, 
     _capture(monkeypatch, "their name is walter\nhates their job")
     _run(memory.distill(1, db.get_chat_state(1)))
 
-    assert {f["fact"] for f in db.recent_facts(1)} == {"their name is walter",
+    assert {f["fact"] for f in recall.recent_facts(1)} == {"their name is walter",
                                                        "hates their job"}
 
 
@@ -254,7 +255,7 @@ def test_the_kids_day_state_never_becomes_a_fact_about_them(tmp_path, monkeypatc
     _run(memory.distill(1, db.get_chat_state(1)))
 
     assert "laundry" not in seen["prompt"]
-    assert db.recent_facts(1) == []
+    assert recall.recent_facts(1) == []
 
 
 def test_the_extractor_is_told_the_lines_are_the_other_persons_only(tmp_path, monkeypatch):
@@ -285,7 +286,7 @@ def test_a_sticker_is_not_a_fact(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "_ask", lambda p: _done(
         "their name is walter\nsent a 💪 sticker\nI sent a 🌟 sticker"))
     _run(memory.distill(1, db.get_chat_state(1)))
-    assert [f["fact"] for f in db.recent_facts(1)] == ["their name is walter"]
+    assert [f["fact"] for f in recall.recent_facts(1)] == ["their name is walter"]
 
 
 def test_an_event_is_not_a_fact(tmp_path, monkeypatch):
@@ -295,7 +296,7 @@ def test_an_event_is_not_a_fact(tmp_path, monkeypatch):
         "they are back after being away\njust said hi\nasked how school was\n"
         "works in IT"))
     _run(memory.distill(1, db.get_chat_state(1)))
-    assert [f["fact"] for f in db.recent_facts(1)] == ["works in IT"]
+    assert [f["fact"] for f in recall.recent_facts(1)] == ["works in IT"]
 
 
 def test_the_durability_filter_keeps_real_facts_about_a_person(tmp_path, monkeypatch):
@@ -308,7 +309,7 @@ def test_the_durability_filter_keeps_real_facts_about_a_person(tmp_path, monkeyp
         "lives in tashkent\nkeeps complaining about their boss\n"
         "is saving up for a new pc"))
     _run(memory.distill(1, db.get_chat_state(1)))
-    assert len(db.recent_facts(1)) == 6
+    assert len(recall.recent_facts(1)) == 6
 
 
 def test_a_pass_of_pure_junk_is_treated_as_nothing_to_record(tmp_path, monkeypatch):
@@ -319,7 +320,7 @@ def test_a_pass_of_pure_junk_is_treated_as_nothing_to_record(tmp_path, monkeypat
     db.add_message(1, "user", "hi")
     monkeypatch.setattr(memory, "_ask", lambda p: _done("sent a 🌟 sticker"))
     assert _run(memory.distill(1, db.get_chat_state(1))) == "their name is walter"
-    assert db.recent_facts(1) == []
+    assert recall.recent_facts(1) == []
 
 
 def test_the_extractor_is_told_to_record_only_durable_things(tmp_path, monkeypatch):
@@ -336,7 +337,7 @@ def test_the_extractor_is_told_to_record_only_durable_things(tmp_path, monkeypat
 
 def test_the_extractor_is_asked_for_one_consistent_voice(tmp_path, monkeypatch):
     """Half the live facts came back quoting the person ("I work in IT") and
-    half describing them ("They work in IT."). db._normalise_fact now folds the
+    half describing them ("They work in IT."). recall._normalise_fact now folds the
     two together, but the cheaper fix is not to produce both in the first
     place."""
     _fresh(tmp_path)
@@ -362,6 +363,6 @@ def test_a_chat_with_only_kid_messages_never_asks_the_model(tmp_path, monkeypatc
     monkeypatch.setattr(memory, "_ask", never)
     _run(memory.distill(1, db.get_chat_state(1)))
 
-    assert db.recent_facts(1) == []
+    assert recall.recent_facts(1) == []
     # Nothing yet, not a failure: back off a few messages, don't burn the cycle.
     assert db.get_chat_state(1)["msgs_since_notes"] == memory.NOTES_EVERY - memory.NONE_BACKOFF

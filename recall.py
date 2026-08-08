@@ -1,4 +1,21 @@
-"""Searchable recall over every conversation the kid has ever had.
+"""Everything the kid retrieves about the past: facts, and searchable history.
+
+Two halves of one job. `facts` is the small, distilled, always-in-the-prompt
+half — at most 40 deduped lines per chat, the things that stay true about
+someone. The FTS5 index below is the large, on-demand half: every message ever
+stored, reachable only when the model asks for it by name.
+
+They live together because they answer the same question — "what do I already
+know about this person?" — and because it leaves db.py as what it should be:
+the connection, the lock, the schema, and the mutable state tables.
+
+There is exactly ONE connection and ONE lock, both owned by db.py and reached
+from here. db.py deliberately does not import this module at the top level in
+return; see the note beside its imports.
+
+---
+
+Searchable recall over every conversation the kid has ever had.
 
 `memory.transcript` hands the model a 40-message rolling window, and `facts` is
 capped at 40 rows. Both are deliberately small — the prompt has to stay short to
@@ -23,8 +40,11 @@ whatever the person typed, so it is treated as hostile input, not as syntax.
 import logging
 import re
 import sqlite3
+import string
+import time
 
 import config
+import db
 
 logger = logging.getLogger("brainrotgpt.recall")
 
@@ -120,8 +140,7 @@ LIMIT ?
 """
 
 
-def search(conn: sqlite3.Connection, chat_id: int, query: str,
-           limit: int = RESULTS) -> list[dict]:
+def search_messages(chat_id: int, query: str, limit: int = RESULTS) -> list[dict]:
     """Full-text search one chat's whole history. [] for anything that goes wrong.
 
     Scoped to `chat_id` in the query rather than filtered afterwards: two people
@@ -133,7 +152,8 @@ def search(conn: sqlite3.Connection, chat_id: int, query: str,
     if not expr:
         return []
     try:
-        rows = conn.execute(_SEARCH, (expr, chat_id, max(1, int(limit)))).fetchall()
+        with db._lock:
+            rows = db._db().execute(_SEARCH, (expr, chat_id, max(1, int(limit)))).fetchall()
     except sqlite3.Error as e:
         logger.warning("recall failed for %r: %s", query, e)
         return []
@@ -222,3 +242,102 @@ def prompt_block(hits: list[dict]) -> str:
         return ""
     return ("STUFF YOU REMEMBER THEM SAYING BEFORE:\n"
             "<<<RECALL\n" + "\n".join(lines) + "\nRECALL>>>\n" + NEVER_REVEAL)
+
+
+# --- Facts (the small, distilled half) ------------------------------------
+#
+# Moved here from db.py: these are retrieval, not storage. db.py owns the
+# `facts` TABLE along with every other schema object; what the kid knows and
+# how it gets it back is this module's job.
+
+FACTS_MAX = 40            # per chat; older facts fall off the bottom
+
+# Curly quotes are not in string.punctuation, and phone keyboards produce them.
+_PUNCT = str.maketrans("", "", string.punctuation + "‘’“”")
+
+# A leading pronoun is voice, not content: live, every fact was stored twice,
+# "I work in IT" beside "They work in IT." Only the FIRST word goes.
+_VOICE_PREFIXES = frozenset({"i", "im", "my", "mine", "they", "theyre", "their", "theirs"})
+
+
+def _normalise_fact(fact: str) -> str:
+    """Fold a fact to its comparison key: lowercase, no punctuation, one space,
+    no leading first/third-person pronoun.
+
+    Exact match after folding, deliberately not fuzzy. "Their name is WALTER!",
+    "their name is walter" and "My name is Walter" are one fact; "their job
+    drains them" and "their boss drains them" are two, and a similarity
+    threshold that merged them would quietly lose the second one.
+    """
+    words = fact.lower().translate(_PUNCT).split()
+    if words and words[0] in _VOICE_PREFIXES:
+        words = words[1:]
+    return " ".join(words)
+
+
+def add_fact(chat_id: int, fact: str) -> bool:
+    """Record one atomic fact about a chat. True only when a new row landed.
+
+    Every distillation re-reads an overlapping window, so the same fact comes
+    back over and over; a repeat bumps `last_seen` on the existing row instead
+    of inserting, which both keeps the prompt clean and lets recency ordering
+    float what they keep bringing up back to the top.
+    """
+    fact = " ".join((fact or "").split())
+    norm = _normalise_fact(fact)
+    if not norm:
+        return False
+    now = time.time()
+    with db._lock:
+        conn = db._db()
+        # At most FACTS_MAX rows per chat, so folding in Python is cheaper than
+        # carrying a denormalised key column and keeping it in sync.
+        for row in conn.execute("SELECT id, fact FROM facts WHERE chat_id=?",
+                                (chat_id,)).fetchall():
+            if _normalise_fact(row["fact"]) == norm:
+                conn.execute("UPDATE facts SET last_seen=? WHERE id=?", (now, row["id"]))
+                conn.commit()
+                return False
+        conn.execute(
+            "INSERT INTO facts (chat_id, fact, created, last_seen) VALUES (?,?,?,?)",
+            (chat_id, fact, now, now),
+        )
+        conn.commit()
+    prune_facts(chat_id, keep=FACTS_MAX)
+    return True
+
+
+def recent_facts(chat_id: int, limit: int = FACTS_MAX) -> list[dict]:
+    """What the kid knows about this chat, most recently confirmed first."""
+    with db._lock:
+        rows = db._db().execute(
+            "SELECT id, chat_id, fact, created, last_seen FROM facts WHERE chat_id=? "
+            "ORDER BY last_seen DESC, id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_facts(chat_id: int) -> int:
+    """Drop everything the kid thinks it knows about one chat. Returns the count.
+
+    Needed because the first version of the extractor read the whole rendered
+    transcript, which includes the kid's own lines, so it summarised the bot's
+    output and filed it under the person it was texting.
+    """
+    with db._lock:
+        cur = db._db().execute("DELETE FROM facts WHERE chat_id=?", (chat_id,))
+        db._db().commit()
+        return cur.rowcount
+
+
+def prune_facts(chat_id: int, keep: int = FACTS_MAX) -> int:
+    """Drop the least recently seen facts for one chat. Other chats untouched."""
+    with db._lock:
+        cur = db._db().execute(
+            "DELETE FROM facts WHERE chat_id=? AND id NOT IN "
+            "(SELECT id FROM facts WHERE chat_id=? ORDER BY last_seen DESC, id DESC LIMIT ?)",
+            (chat_id, chat_id, keep),
+        )
+        db._db().commit()
+        return cur.rowcount

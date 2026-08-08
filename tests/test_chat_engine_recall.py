@@ -191,6 +191,26 @@ def test_a_recall_that_raises_still_produces_a_reply(tmp_path, monkeypatch):
     assert [p.value for p in pieces] == ["wdym"]
 
 
+def test_an_unrecognised_tool_name_runs_nothing(tmp_path, monkeypatch):
+    """Each tool is dispatched by name, and an unknown one changes nothing.
+
+    Without the explicit match, a third tool added without a branch would fall
+    through to whichever branch happened to be last and silently run a web
+    search for it.
+    """
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, chat_engine.ToolCall("rabbit", "some_future_tool"), "yo")
+    seen = []
+    monkeypatch.setattr(db, "search_messages", lambda c, q, *a, **k: seen.append(q) or [])
+    db.add_message(1, "user", "i got a rabbit called kevin")
+
+    pieces = _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+
+    assert [p.value for p in pieces] == ["yo"]
+    assert seen == []
+    assert "STUFF YOU REMEMBER" not in calls[1]["messages"][0]["content"]
+
+
 def test_a_reply_is_offered_both_tools(tmp_path, monkeypatch):
     _fresh(tmp_path)
     calls = _patch_groq(monkeypatch, "yo")

@@ -3,6 +3,7 @@ import time
 
 import config
 import db
+import recall
 
 
 def _fresh(tmp_path):
@@ -200,17 +201,17 @@ def test_all_chat_ids_includes_chats_that_only_have_messages(tmp_path):
 
 def test_facts_accumulate_and_come_back_newest_first(tmp_path):
     _fresh(tmp_path)
-    assert db.add_fact(1, "their name is walter") is True
-    assert db.add_fact(1, "hates their job") is True
-    assert [f["fact"] for f in db.recent_facts(1)] == ["hates their job",
+    assert recall.add_fact(1, "their name is walter") is True
+    assert recall.add_fact(1, "hates their job") is True
+    assert [f["fact"] for f in recall.recent_facts(1)] == ["hates their job",
                                                        "their name is walter"]
 
 
 def test_facts_are_scoped_to_their_chat(tmp_path):
     _fresh(tmp_path)
-    db.add_fact(1, "their name is walter")
-    db.add_fact(2, "their name is jesse")
-    assert [f["fact"] for f in db.recent_facts(2)] == ["their name is jesse"]
+    recall.add_fact(1, "their name is walter")
+    recall.add_fact(2, "their name is jesse")
+    assert [f["fact"] for f in recall.recent_facts(2)] == ["their name is jesse"]
 
 
 def test_a_near_duplicate_fact_bumps_last_seen_instead_of_inserting(tmp_path):
@@ -218,11 +219,11 @@ def test_a_near_duplicate_fact_bumps_last_seen_instead_of_inserting(tmp_path):
     and over. Inserting each one floods the prompt with forty copies of the
     person's name and crowds out everything else they ever said."""
     _fresh(tmp_path)
-    db.add_fact(1, "their name is walter")
-    db.add_fact(1, "older fact")
-    first = db.recent_facts(1)
-    assert db.add_fact(1, "  Their name is WALTER!  ") is False   # not a new row
-    rows = db.recent_facts(1)
+    recall.add_fact(1, "their name is walter")
+    recall.add_fact(1, "older fact")
+    first = recall.recent_facts(1)
+    assert recall.add_fact(1, "  Their name is WALTER!  ") is False   # not a new row
+    rows = recall.recent_facts(1)
     assert len(rows) == 2
     assert rows[0]["fact"] == "their name is walter"              # bumped to newest
     walter = next(r for r in rows if r["fact"] == "their name is walter")
@@ -237,60 +238,60 @@ def test_a_first_person_fact_collapses_into_its_third_person_twin(tmp_path):
     normaliser folded punctuation and case but not the pronoun voice. Each fact
     was eating two of the forty slots."""
     _fresh(tmp_path)
-    assert db.add_fact(1, "They work in IT.") is True
-    assert db.add_fact(1, "I work in IT") is False
-    assert db.add_fact(1, "Their name is Walter.") is True
-    assert db.add_fact(1, "My name is Walter") is False
-    assert db.add_fact(1, "I'm from tashkent") is True
-    assert db.add_fact(1, "They're from tashkent") is False   # curly-quote-proof too
-    assert db.add_fact(1, "I’m from tashkent") is False
-    assert len(db.recent_facts(1)) == 3
+    assert recall.add_fact(1, "They work in IT.") is True
+    assert recall.add_fact(1, "I work in IT") is False
+    assert recall.add_fact(1, "Their name is Walter.") is True
+    assert recall.add_fact(1, "My name is Walter") is False
+    assert recall.add_fact(1, "I'm from tashkent") is True
+    assert recall.add_fact(1, "They're from tashkent") is False   # curly-quote-proof too
+    assert recall.add_fact(1, "I’m from tashkent") is False
+    assert len(recall.recent_facts(1)) == 3
 
 
 def test_the_voice_fold_does_not_merge_different_facts(tmp_path):
     """Stripping the leading pronoun must not make everything after it collide."""
     _fresh(tmp_path)
-    assert db.add_fact(1, "their job drains them") is True
-    assert db.add_fact(1, "their boss drains them") is True
-    assert len(db.recent_facts(1)) == 2
+    assert recall.add_fact(1, "their job drains them") is True
+    assert recall.add_fact(1, "their boss drains them") is True
+    assert len(recall.recent_facts(1)) == 2
 
 
 def test_a_bare_pronoun_is_not_a_fact(tmp_path):
     _fresh(tmp_path)
-    assert db.add_fact(1, "they") is False
-    assert db.recent_facts(1) == []
+    assert recall.add_fact(1, "they") is False
+    assert recall.recent_facts(1) == []
 
 
 def test_empty_facts_are_not_stored(tmp_path):
     _fresh(tmp_path)
-    assert db.add_fact(1, "   ") is False
-    assert db.recent_facts(1) == []
+    assert recall.add_fact(1, "   ") is False
+    assert recall.recent_facts(1) == []
 
 
 def test_prune_facts_drops_the_oldest_first(tmp_path):
     _fresh(tmp_path)
     for i in range(10):
-        db.add_fact(1, f"fact {i}")
-    assert db.prune_facts(1, keep=4) == 6
-    assert [f["fact"] for f in db.recent_facts(1)] == [
+        recall.add_fact(1, f"fact {i}")
+    assert recall.prune_facts(1, keep=4) == 6
+    assert [f["fact"] for f in recall.recent_facts(1)] == [
         "fact 9", "fact 8", "fact 7", "fact 6"]
 
 
 def test_prune_facts_leaves_other_chats_alone(tmp_path):
     _fresh(tmp_path)
-    db.add_fact(1, "a")
-    db.add_fact(2, "b")
-    db.prune_facts(1, keep=0)
-    assert [f["fact"] for f in db.recent_facts(2)] == ["b"]
+    recall.add_fact(1, "a")
+    recall.add_fact(2, "b")
+    recall.prune_facts(1, keep=0)
+    assert [f["fact"] for f in recall.recent_facts(2)] == ["b"]
 
 
 def test_facts_survive_a_second_init_db(tmp_path):
     """The migration lands on a live database with real rows in it."""
     _fresh(tmp_path)
-    db.add_fact(1, "their name is walter")
+    recall.add_fact(1, "their name is walter")
     db.close()
     db.init_db(str(tmp_path / "t.db"))     # idempotent second run
-    assert [f["fact"] for f in db.recent_facts(1)] == ["their name is walter"]
+    assert [f["fact"] for f in recall.recent_facts(1)] == ["their name is walter"]
 
 
 def test_init_db_drops_a_legacy_generations_table(tmp_path):
@@ -318,17 +319,17 @@ def test_clear_facts_empties_one_chat_and_leaves_others_alone(tmp_path):
     """Needed to purge production: every fact stored so far was extracted from
     the kid's own messages and attributed to the person it was texting."""
     _fresh(tmp_path)
-    db.add_fact(1, "they are disciplined")
-    db.add_fact(1, "they have a laundry task")
-    db.add_fact(2, "their name is jesse")
-    assert db.clear_facts(1) == 2
-    assert db.recent_facts(1) == []
-    assert [f["fact"] for f in db.recent_facts(2)] == ["their name is jesse"]
+    recall.add_fact(1, "they are disciplined")
+    recall.add_fact(1, "they have a laundry task")
+    recall.add_fact(2, "their name is jesse")
+    assert recall.clear_facts(1) == 2
+    assert recall.recent_facts(1) == []
+    assert [f["fact"] for f in recall.recent_facts(2)] == ["their name is jesse"]
 
 
 def test_clear_facts_on_a_chat_with_none_is_a_no_op(tmp_path):
     _fresh(tmp_path)
-    assert db.clear_facts(999) == 0
+    assert recall.clear_facts(999) == 0
 
 
 def test_recent_messages_can_be_filtered_to_one_role(tmp_path):

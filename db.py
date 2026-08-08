@@ -8,12 +8,15 @@ Calls are synchronous but tiny (local file); a lock keeps them safe across the
 event loop and the job-queue threads.
 """
 import sqlite3
-import string
 import threading
 import time
 
 import config
-import recall
+
+# `recall` is imported inside the two functions that need it, never at module
+# level. recall.py imports THIS module to reach the one connection and the one
+# lock, so a top-level import here would close the cycle — and a circular import
+# fails at startup, on a live bot, rather than in a test.
 
 # Reentrant on purpose: every accessor calls _db() *inside* `with _lock`, and
 # _db() falls back to init_db() when the connection is closed, which takes the
@@ -96,6 +99,7 @@ def init_db(path: str | None = None) -> None:
                      "generations"):
             _conn.execute(f"DROP TABLE IF EXISTS {dead}")
         # Last: it indexes `messages`, so the table has to exist first.
+        import recall
         recall.init_fts(_conn)
         _conn.commit()
 
@@ -253,13 +257,15 @@ def recent_messages(chat_id: int, limit: int = 20, role: str | None = None) -> l
     return [dict(r) for r in reversed(rows)]
 
 
-def search_messages(chat_id: int, query: str, limit: int = recall.RESULTS) -> list[dict]:
+def search_messages(chat_id: int, query: str, limit: int = 8) -> list[dict]:
     """Full-text recall over one chat's ENTIRE history, not just the window.
 
-    Scoped, sanitised and failure-proof in recall.py; this is the locked door.
+    Kept here because `messages` is this module's table and callers already
+    reach for db for anything message-shaped; the scoping, sanitising and
+    failure-swallowing all live in recall.py.
     """
-    with _lock:
-        return recall.search(_db(), chat_id, query, limit)
+    import recall
+    return recall.search_messages(chat_id, query, limit)
 
 
 def prune_messages(chat_id: int, keep: int = 100) -> int:
@@ -267,101 +273,6 @@ def prune_messages(chat_id: int, keep: int = 100) -> int:
         cur = _db().execute(
             "DELETE FROM messages WHERE chat_id=? AND id NOT IN "
             "(SELECT id FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?)",
-            (chat_id, chat_id, keep),
-        )
-        _db().commit()
-        return cur.rowcount
-
-
-# --- Facts (the accumulating half of memory) ------------------------------
-
-FACTS_MAX = 40            # per chat; older facts fall off the bottom
-
-# Curly quotes are not in string.punctuation, and phone keyboards produce them.
-_PUNCT = str.maketrans("", "", string.punctuation + "‘’“”")
-
-# A leading pronoun is voice, not content: live, every fact was stored twice,
-# "I work in IT" beside "They work in IT." Only the FIRST word goes.
-_VOICE_PREFIXES = frozenset({"i", "im", "my", "mine", "they", "theyre", "their", "theirs"})
-
-
-def _normalise_fact(fact: str) -> str:
-    """Fold a fact to its comparison key: lowercase, no punctuation, one space,
-    no leading first/third-person pronoun.
-
-    Exact match after folding, deliberately not fuzzy. "Their name is WALTER!",
-    "their name is walter" and "My name is Walter" are one fact; "their job
-    drains them" and "their boss drains them" are two, and a similarity
-    threshold that merged them would quietly lose the second one.
-    """
-    words = fact.lower().translate(_PUNCT).split()
-    if words and words[0] in _VOICE_PREFIXES:
-        words = words[1:]
-    return " ".join(words)
-
-
-def add_fact(chat_id: int, fact: str) -> bool:
-    """Record one atomic fact about a chat. True only when a new row landed.
-
-    Every distillation re-reads an overlapping window, so the same fact comes
-    back over and over; a repeat bumps `last_seen` on the existing row instead
-    of inserting, which both keeps the prompt clean and lets recency ordering
-    float what they keep bringing up back to the top.
-    """
-    fact = " ".join((fact or "").split())
-    norm = _normalise_fact(fact)
-    if not norm:
-        return False
-    now = time.time()
-    with _lock:
-        conn = _db()
-        # At most FACTS_MAX rows per chat, so folding in Python is cheaper than
-        # carrying a denormalised key column and keeping it in sync.
-        for row in conn.execute("SELECT id, fact FROM facts WHERE chat_id=?",
-                                (chat_id,)).fetchall():
-            if _normalise_fact(row["fact"]) == norm:
-                conn.execute("UPDATE facts SET last_seen=? WHERE id=?", (now, row["id"]))
-                conn.commit()
-                return False
-        conn.execute(
-            "INSERT INTO facts (chat_id, fact, created, last_seen) VALUES (?,?,?,?)",
-            (chat_id, fact, now, now),
-        )
-        conn.commit()
-    prune_facts(chat_id, keep=FACTS_MAX)
-    return True
-
-
-def recent_facts(chat_id: int, limit: int = FACTS_MAX) -> list[dict]:
-    """What the kid knows about this chat, most recently confirmed first."""
-    with _lock:
-        rows = _db().execute(
-            "SELECT id, chat_id, fact, created, last_seen FROM facts WHERE chat_id=? "
-            "ORDER BY last_seen DESC, id DESC LIMIT ?",
-            (chat_id, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def clear_facts(chat_id: int) -> int:
-    """Drop everything the kid thinks it knows about one chat. Returns the count.
-
-    Needed because the first version of the extractor read the whole rendered
-    transcript, which includes the kid's own lines, so it summarised the bot's
-    output and filed it under the person it was texting.
-    """
-    with _lock:
-        cur = _db().execute("DELETE FROM facts WHERE chat_id=?", (chat_id,))
-        _db().commit()
-        return cur.rowcount
-
-
-def prune_facts(chat_id: int, keep: int = FACTS_MAX) -> int:
-    """Drop the least recently seen facts for one chat. Other chats untouched."""
-    with _lock:
-        cur = _db().execute(
-            "DELETE FROM facts WHERE chat_id=? AND id NOT IN "
-            "(SELECT id FROM facts WHERE chat_id=? ORDER BY last_seen DESC, id DESC LIMIT ?)",
             (chat_id, chat_id, keep),
         )
         _db().commit()

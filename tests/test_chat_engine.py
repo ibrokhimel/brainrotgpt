@@ -1,6 +1,7 @@
 import random
 
 import chat_engine
+import recall
 
 STATE = {"mood": "sigma", "bond": 0, "notes": "", "salty": 0, "chattiness": "normal",
          "mood_set_at": 0.0}
@@ -350,8 +351,8 @@ def test_context_pulls_this_chats_facts_from_the_db(tmp_path):
     import db
     db.close()
     db.init_db(str(tmp_path / "ce_facts.db"))
-    db.add_fact(1, "their name is walter")
-    db.add_fact(2, "their name is jesse")
+    recall.add_fact(1, "their name is walter")
+    recall.add_fact(2, "their name is jesse")
     assert chat_engine._facts_for(db.get_chat_state(1)) == ["their name is walter"]
 
 
@@ -359,6 +360,6 @@ def test_facts_lookup_never_breaks_generation(monkeypatch):
     def boom(chat_id, limit=0):
         raise RuntimeError("db gone")
 
-    monkeypatch.setattr(chat_engine.db, "recent_facts", boom)
+    monkeypatch.setattr(chat_engine.recall, "recent_facts", boom)
     assert chat_engine._facts_for({"chat_id": 1}) == []
     assert chat_engine._facts_for({}) == []

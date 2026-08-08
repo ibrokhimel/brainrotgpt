@@ -15,6 +15,7 @@ from groq import AsyncGroq
 import budget
 import config
 import db
+import recall
 
 logger = logging.getLogger("brainrotgpt.memory")
 
@@ -152,7 +153,7 @@ async def _ask(prompt: str) -> str:
 def facts_from(raw: str) -> list[str]:
     """Split a distillation into atomic, independently storable facts.
 
-    Event lines are dropped here rather than in db.add_fact, so that they never
+    Event lines are dropped here rather than in recall.add_fact, so that they never
     reach the notes blob either — the two are written from the same list.
     """
     out: list[str] = []
@@ -195,7 +196,7 @@ async def distill(chat_id: int, state: dict) -> str:
             facts = facts_from(raw)
             if facts:
                 for fact in facts:
-                    db.add_fact(chat_id, fact)
+                    recall.add_fact(chat_id, fact)
                 notes = "\n".join(facts)[:NOTES_MAX_CHARS]
             else:
                 since = max(0, NOTES_EVERY - NONE_BACKOFF)
