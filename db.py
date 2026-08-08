@@ -13,6 +13,7 @@ import threading
 import time
 
 import config
+import recall
 
 # Reentrant on purpose: every accessor calls _db() *inside* `with _lock`, and
 # _db() falls back to init_db() when the connection is closed, which takes the
@@ -94,6 +95,8 @@ def init_db(path: str | None = None) -> None:
         for dead in ("favorites", "subscriptions", "last_results", "settings",
                      "generations"):
             _conn.execute(f"DROP TABLE IF EXISTS {dead}")
+        # Last: it indexes `messages`, so the table has to exist first.
+        recall.init_fts(_conn)
         _conn.commit()
 
 
@@ -248,6 +251,15 @@ def recent_messages(chat_id: int, limit: int = 20, role: str | None = None) -> l
     with _lock:
         rows = _db().execute(f"{q} ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]
+
+
+def search_messages(chat_id: int, query: str, limit: int = recall.RESULTS) -> list[dict]:
+    """Full-text recall over one chat's ENTIRE history, not just the window.
+
+    Scoped, sanitised and failure-proof in recall.py; this is the locked door.
+    """
+    with _lock:
+        return recall.search(_db(), chat_id, query, limit)
 
 
 def prune_messages(chat_id: int, keep: int = 100) -> int:

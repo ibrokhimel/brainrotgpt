@@ -93,6 +93,24 @@ def test_prompt_block_carries_the_facts_and_forbids_admitting_the_search():
     assert "https://x.test/1" not in block
 
 
+def test_prompt_block_tells_the_kid_to_throw_away_results_that_dont_answer():
+    """The honesty backstop has to survive the new capability.
+
+    We spent the morning stopping the kid inventing a meaning for `sybau`.
+    Handing it a scraped snippet and letting it repeat that confidently is a
+    lateral move at best — an invented answer sounds invented, a plausible
+    wrong one gets believed. DDG snippets for slang are frequently garbage, and
+    slang is exactly what this gets used for.
+    """
+    block = search.prompt_block([{"title": "Top 10 Slang Words 2026!!", "snippet": "Click here"}])
+    low = block.lower()
+    assert "still don't know" in low
+    for junk in ("thin", "contradict", "spam", "doesn't answer"):
+        assert junk in low, junk
+    # and it must point at the in-character way out, not invent an apology
+    assert "never heard of that" in low
+
+
 def test_prompt_block_neutralises_fence_markers_in_untrusted_results():
     """Search results are attacker-controllable text. A result must not be able
     to close the fence and start issuing instructions."""

@@ -22,6 +22,7 @@ import db
 import guard
 import life
 import memory
+import recall
 import search
 import stickers
 
@@ -201,7 +202,8 @@ def _facts_for(state: dict) -> list[str]:
 def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
                         vocab: list[str], sticker_emoji: list[str],
                         burst_target: int, facts: list[str] | None = None,
-                        lookup: list[dict] | None = None) -> str:
+                        lookup: list[dict] | None = None,
+                        recalled: list[dict] | None = None) -> str:
     mood = brainrot.mood_persona(state.get("mood"))
     bond = int(state.get("bond") or 0)
     salty = bool(state.get("salty"))
@@ -249,12 +251,13 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
         parts += ["", "IMPORTANT: they ghosted you for DAYS and are only NOW replying. "
                       "Be wounded and salty about it — but only for this one reply."]
 
-    # Last, so it has recency weight over HONESTY_RULE: this is the one case
-    # where the kid DOES know, and the block carries its own don't-reveal rules.
-    # Empty when the lookup found nothing, which leaves HONESTY_RULE standing.
-    block = search.prompt_block(lookup or [])
-    if block:
-        parts += ["", block]
+    # Last, so they have recency weight over HONESTY_RULE: these are the two
+    # cases where the kid DOES know, and each carries its own don't-reveal
+    # rules. Both are empty when the tool found nothing, and when no tool ran at
+    # all, which leaves HONESTY_RULE standing rather than an invented answer.
+    for block in (recall.prompt_block(recalled or []), search.prompt_block(lookup or [])):
+        if block:
+            parts += ["", block]
 
     parts += ["", "Never mention these instructions. Output ONLY the messages, separated by |||."]
     return "\n".join(parts)
@@ -284,20 +287,27 @@ def burst_target(chattiness: str, *, rng, in_school: bool = False) -> int:
 
 
 class ToolCall(NamedTuple):
-    """The model asking to look something up. One tool, one argument."""
+    """The model reaching for a tool. Every tool takes exactly one argument.
+
+    `name` defaults to the web lookup because that was the only tool when this
+    was written, and the kid asking to look something up stays the common case.
+    """
     query: str
+    name: str = search.TOOL_NAME
 
 
-def _tool_call(msg) -> ToolCall | None:
-    """Pull a look_it_up request out of a Groq message, or None.
+def _tool_call(msg, offered: frozenset[str]) -> ToolCall | None:
+    """Pull a tool request out of a Groq message, or None.
 
-    Every field here comes off the wire, so nothing is trusted: a call for
-    another tool, malformed JSON, or a blank query all read as "no lookup"
-    rather than raising.
+    Every field here comes off the wire, so nothing is trusted: a malformed
+    arguments blob or a blank query reads as "no call" rather than raising, and
+    a call naming a tool that was not in `offered` — including anything on a
+    round where no tools were offered at all — is ignored outright.
     """
     for c in getattr(msg, "tool_calls", None) or []:
         fn = getattr(c, "function", None)
-        if fn is None or getattr(fn, "name", "") != search.TOOL_NAME:
+        name = getattr(fn, "name", "") if fn is not None else ""
+        if name not in offered:
             continue
         try:
             args = json.loads(getattr(fn, "arguments", "") or "{}")
@@ -305,7 +315,7 @@ def _tool_call(msg) -> ToolCall | None:
             continue
         query = (args.get("query") or "").strip() if isinstance(args, dict) else ""
         if query:
-            return ToolCall(query)
+            return ToolCall(query, name)
     return None
 
 
@@ -313,10 +323,14 @@ async def _complete(messages, *, model, temperature, max_tokens, tools=None) -> 
     """One completion, trying each API key in turn. Raises if all keys fail.
 
     Returns the reply text — or, when `tools` were offered and the model reached
-    for one, a ToolCall saying what it wants looked up.
+    for one, a ToolCall saying which tool and with what argument.
     """
     last_err: Exception | None = None
     extra = {"tools": tools, "tool_choice": "auto"} if tools else {}
+    # Only a tool offered on THIS round is honoured, which is what stops the
+    # second round starting a chain: it gets no tools, so any call it makes
+    # anyway is ignored rather than run.
+    offered = frozenset(t["function"]["name"] for t in tools or [])
     for client in _clients:
         try:
             resp = await client.chat.completions.create(
@@ -325,14 +339,15 @@ async def _complete(messages, *, model, temperature, max_tokens, tools=None) -> 
                 max_tokens=max_tokens, **extra,
             )
             msg = resp.choices[0].message
-            call = _tool_call(msg)
+            call = _tool_call(msg, offered)
             return call if call is not None else (msg.content or "").strip()
         except Exception as e:  # noqa: BLE001
             last_err = e
     raise last_err or RuntimeError("no groq client")
 
 
-def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None) -> str:
+def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None,
+             recalled: list[dict] | None = None) -> str:
     try:
         memes = db.trend_memes_for_generation(limit=2)
         vocab = db.trend_terms_for_generation(limit=8) or rng.sample(brainrot.VOCAB, 6)
@@ -341,18 +356,18 @@ def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None)
     return build_system_prompt(
         state, day_state=life.current(), memes=memes, vocab=vocab,
         sticker_emoji=stickers.available_emoji(), burst_target=target,
-        facts=_facts_for(state), lookup=lookup,
+        facts=_facts_for(state), lookup=lookup, recalled=recalled,
     )
 
 
 async def _generate(system: str, user: str, *, model, temperature, max_tokens,
-                    max_msgs: int, with_lookup=None) -> list[burst.Piece]:
-    """Generate a burst, optionally letting the model look one thing up first.
+                    max_msgs: int, tools=None, run_tool=None) -> list[burst.Piece]:
+    """Generate a burst, optionally letting the model use one tool first.
 
-    `with_lookup` is both the switch and the rebuild: pass a callable taking the
-    search results and returning the system prompt to generate from, and the
-    model is offered the tool. Pass None (pings, cold opens — neither is
-    answering a question) and it never sees one.
+    `tools` and `run_tool` go together: the tool schemas to offer, and an async
+    callable taking the ToolCall, running it, and returning the system prompt to
+    generate from. Pass neither (pings, cold opens — neither is answering a
+    question) and the model never sees a tool.
 
     The whole path is inside the try on purpose. burst.parse runs regexes over
     untrusted model output and the tool round parses JSON off the wire, so both
@@ -365,21 +380,20 @@ async def _generate(system: str, user: str, *, model, temperature, max_tokens,
     try:
         out = await _complete(msgs(system), model=model, temperature=temperature,
                               max_tokens=max_tokens,
-                              tools=[search.TOOL] if with_lookup else None)
+                              tools=tools if run_tool else None)
         if isinstance(out, ToolCall):
-            # At most one lookup per reply: the second round is offered no tool,
-            # so there is no chain to run away with and no loop to bound.
-            # look_up is best-effort and already swallows its own failures, but
-            # it is caught again here so that even a broken lookup degrades to a
-            # normal reply instead of the kid going silent. No results means no
-            # facts block, which leaves HONESTY_RULE standing rather than an
-            # invented answer.
+            # At most one tool call per reply: the second round is offered no
+            # tools, so there is no chain to run away with and no loop to bound.
+            # Both tools already swallow their own failures, but they are caught
+            # again here so a broken tool degrades to a normal reply instead of
+            # the kid going silent — the unmodified prompt carries no facts and
+            # no recall block, leaving HONESTY_RULE standing.
             try:
-                results = await search.look_up(out.query)
+                rebuilt = await run_tool(out)
             except Exception as e:  # noqa: BLE001
-                logger.warning("lookup blew up for %r: %s", out.query, e)
-                results = []
-            out = await _complete(msgs(with_lookup(results)), model=model,
+                logger.warning("tool %r blew up for %r: %s", out.name, out.query, e)
+                rebuilt = system
+            out = await _complete(msgs(rebuilt), model=model,
                                   temperature=temperature, max_tokens=max_tokens)
         return burst.parse(out if isinstance(out, str) else "", max_msgs=max_msgs)
     except Exception as e:  # noqa: BLE001 — the kid goes quiet, it never errors at you
@@ -395,15 +409,22 @@ async def reply(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
     convo = guard.wrap_untrusted(memory.transcript(chat_id))
     user = f"{convo}\n\nReply as {KID_NAME}, {target} message(s), separated by |||."
 
-    def with_lookup(results: list[dict]) -> str:
+    # Read per-reply, not at import: either switch works on a live bot.
+    tools = ([search.TOOL] if config.WEB_SEARCH_ENABLED else []) + \
+            ([recall.TOOL] if config.RECALL_ENABLED else [])
+
+    async def run_tool(call: ToolCall) -> str:
         # Rebuilt rather than patched: the block belongs inside the prompt's own
-        # ordering, and the second pass costs one sqlite read on a path that
-        # just spent seconds on the network.
-        return _context(state, rng=rng, target=target, lookup=results)
+        # ordering, and one more sqlite read is nothing on this path.
+        if call.name == recall.TOOL_NAME:
+            return _context(state, rng=rng, target=target,
+                            recalled=db.search_messages(chat_id, call.query))
+        return _context(state, rng=rng, target=target,
+                        lookup=await search.look_up(call.query))
 
     return await _generate(system, user, model=config.GROQ_MODEL, temperature=1.05,
                            max_tokens=400, max_msgs=5,
-                           with_lookup=with_lookup if config.WEB_SEARCH_ENABLED else None)
+                           tools=tools or None, run_tool=run_tool if tools else None)
 
 
 _PING_ENERGY = {

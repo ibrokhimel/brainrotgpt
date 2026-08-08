@@ -78,8 +78,32 @@ NEVER_REVEAL = (
     "no definition voice. Say it the way you say everything else: lowercase, short, in your "
     "own words, one thing at a time, with your usual reaction on top of it.\n"
     "You may open the burst with \"hold on\" or \"wait lemme check\" before you come back "
-    "with it — that's just you on your phone. Never say what you were checking.\n"
-    "If the above doesn't actually answer what they asked, you still don't know. Say so."
+    "with it — that's just you on your phone. Never say what you were checking."
+)
+
+# The honesty backstop, and it has to sit UNDER the new capability rather than
+# be replaced by it. The bug this whole feature exists to fix was the kid
+# inventing a meaning for `sybau`; handing it a scraped snippet and letting it
+# repeat that confidently is a lateral move at best. An invented answer sounds
+# invented and gets laughed at — a plausible wrong one gets believed. And DDG
+# snippets for slang are frequently listicle spam, which is exactly the query
+# class this will see most.
+#
+# So: results ARRIVING is not results ANSWERING. The failure cases are
+# enumerated rather than left as "use your judgement", and the way out points
+# at the same lines HONESTY_RULE already gives it — the honest answer is also
+# the in-character one, and a 14-year-old not knowing a word costs nothing.
+JUDGE_IT = (
+    "BEFORE YOU USE ANY OF THAT — decide whether it actually told you anything. Repeating "
+    "something wrong is WORSE than not knowing: made-up nonsense just sounds made up, but a "
+    "confident wrong answer gets believed.\n"
+    "If what's above is thin, vague, contradicts itself, is obviously spam or seo listicle "
+    "garbage, is about something else entirely, or simply doesn't answer what they actually "
+    "asked — then you STILL DON'T KNOW, exactly as if you'd never thought about it. Say so "
+    "in your voice: \"bro what does that even mean 💀\", \"never heard of that\", \"is that "
+    "a game or\", \"explain 😭\".\n"
+    "Do not half-know it. Do not hedge it into sounding informed. Do not grab the least-bad "
+    "line and repeat it. Use it ONLY if it plainly and obviously answers them."
 )
 
 # A result can contain anything, including our own fence markers. Strip runs of
@@ -154,5 +178,8 @@ def prompt_block(results: list[dict]) -> str:
             lines.append("- " + f"{title}: {snippet}".strip(" :"))
     if not lines:
         return ""
+    # JUDGE_IT before NEVER_REVEAL: whether to use this at all comes first, how
+    # to say it only matters once it has survived that.
     return ("STUFF YOU ALREADY KNOW ABOUT WHAT THEY JUST SAID:\n"
-            "<<<KNOWN\n" + "\n".join(lines) + "\nKNOWN>>>\n" + NEVER_REVEAL)
+            "<<<KNOWN\n" + "\n".join(lines) + "\nKNOWN>>>\n"
+            + JUDGE_IT + "\n" + NEVER_REVEAL)

@@ -98,6 +98,12 @@ KYM_FETCH_ENABLED = _flag("KYM_FETCH_ENABLED", True)
 # redeploy, no code change — and the kid falls back to admitting it doesn't know.
 WEB_SEARCH_ENABLED = _flag("WEB_SEARCH_ENABLED", True)
 
+# --- Recall (the kid reaching past the 40-message window) ------------------
+# FTS5 over every message ever stored, so a conversation from last week is still
+# reachable. Local, so it costs no network round trip. Off leaves the kid with
+# the rolling window and the facts list, exactly as before.
+RECALL_ENABLED = _flag("RECALL_ENABLED", True)
+
 TREND_FETCH_HOUR = _int("TREND_FETCH_HOUR", 5)  # daily auto-fetch hour (server local)
 TREND_MAX_ADD = _int("TREND_MAX_ADD", 25)  # cap terms stored per auto refresh
 

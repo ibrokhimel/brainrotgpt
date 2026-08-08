@@ -115,6 +115,35 @@ def test_a_search_that_finds_nothing_still_produces_a_reply_and_invents_nothing(
     assert "NEVER fake recognition" in final_system
 
 
+JUNK = [{"title": "Top 10 Gen Z Slang Words of 2026 (You Won't BELIEVE #7)",
+         "snippet": "Sign up for our newsletter to keep up with the latest trends! Click here.",
+         "url": "https://seo.test/1"}]
+
+
+def test_junk_results_do_not_override_the_kids_right_to_not_know(tmp_path, monkeypatch):
+    """Results ARRIVING is not results ANSWERING.
+
+    This asserts the instruction, not the model's behaviour — the seam is
+    stubbed, so nothing here can prove what llama does with it. What it does
+    prove is that a reply built on junk still carries both halves: the rule
+    saying throw it away if it doesn't answer, and HONESTY_RULE underneath.
+    A regression that dropped either would land silently otherwise.
+    """
+    _fresh(tmp_path)
+    calls = _patch_groq(monkeypatch, chat_engine.ToolCall("sybau"), "bro idk what that even means 💀")
+    _patch_search(monkeypatch, JUNK)
+
+    db.add_message(1, "user", "fym gng sybau")
+    pieces = _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
+
+    assert [p.value for p in pieces] == ["bro idk what that even means 💀"]
+    final = calls[1]["messages"][0]["content"]
+    assert "NEVER fake recognition" in final          # HONESTY_RULE still standing
+    low = final.lower()
+    assert "still don't know" in low                  # and the judgement clause on top
+    assert "spam" in low and "contradicts itself" in low
+
+
 def test_a_search_that_raises_still_produces_a_reply(tmp_path, monkeypatch):
     _fresh(tmp_path)
     _patch_groq(monkeypatch, chat_engine.ToolCall("sybau"), "never heard of that")
@@ -153,7 +182,9 @@ def test_a_reply_is_offered_the_tool(tmp_path, monkeypatch):
     calls = _patch_groq(monkeypatch, "yo")
     _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
     names = [t["function"]["name"] for t in calls[0]["tools"]]
-    assert names == [search.TOOL_NAME]
+    # Membership, not equality: `remember` is offered alongside this one, and
+    # which other tools exist is not what this test is about.
+    assert search.TOOL_NAME in names
 
 
 def test_pings_and_cold_opens_get_no_tool(tmp_path, monkeypatch):
@@ -170,4 +201,6 @@ def test_the_tool_is_withheld_when_web_search_is_switched_off(tmp_path, monkeypa
     monkeypatch.setattr(config, "WEB_SEARCH_ENABLED", False)
     calls = _patch_groq(monkeypatch, "yo")
     _run(chat_engine.reply(1, db.get_chat_state(1), rng=random.Random(0)))
-    assert calls[0]["tools"] is None
+    # The switch withholds THIS tool; `remember` has its own and is unaffected.
+    names = [t["function"]["name"] for t in calls[0]["tools"] or []]
+    assert search.TOOL_NAME not in names
