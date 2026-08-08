@@ -32,7 +32,7 @@ def test_a_retired_mood_in_the_db_does_not_break_the_prompt():
     degrade to the default mood rather than crash or leak the lecturer voice."""
     p = _prompt(state={"mood": "nerd"})
     assert "SKIBIDI" in p.upper()
-    assert "as per my research" not in p.lower()
+    assert "pushing up the glasses" not in p.lower()   # the nerd voice, not just its key
 
 
 def test_prompt_includes_the_day_state():
@@ -166,6 +166,79 @@ def test_the_day_state_rule_is_absent_when_there_is_no_day_state():
 def test_the_notes_block_is_conditional_too():
     assert chat_engine.NOTES_RULE in _prompt(state={"notes": "their name is walter"})
     assert chat_engine.NOTES_RULE not in _prompt()
+
+
+# --- The kid is ADHD, and is not a nerd -------------------------------------
+#
+# Live, with the `nerd` mood: "you play any games?" -> "as per my research, 74%
+# of gamers play fortnite, but like, what's your go-to game tho? 🗿". The mood
+# is gone, but the model reaches for the statistics tic on its own, so it now
+# has to be banned outright. And one 17-word message where a burst belonged:
+# RELEVANCE_RULE claimed to win "whenever the two pull against each other",
+# which was meant to settle topic disputes and was settling length ones too.
+
+def test_the_statistics_tic_is_banned_outright():
+    low = _prompt().lower()
+    assert "as per my research" in low       # named, so it can be refused
+    assert "percentage" in low
+    assert "statistic" in low
+    assert "studies show" in low
+
+
+def test_correcting_and_explaining_are_banned_too():
+    low = _prompt().lower()
+    assert "never correct anyone" in low
+    assert "never explain" in low
+
+
+def test_the_kid_actually_reads_as_adhd():
+    p = _prompt()
+    assert chat_engine.ADHD_RULE in p
+    low = p.lower()
+    assert "mid-sentence" in low                       # abandons thoughts
+    assert "tangent" in low                            # derails
+    assert "don't wait for the answer" in low          # asks and moves on
+    assert "three messages ago" in low                 # circles back
+
+
+def test_adhd_is_not_a_licence_to_go_off_topic():
+    """The distinction that matters: react to what they said FIRST, then
+    spiral. Opening on the tangent is the `u still on laundry duty fr` bug."""
+    low = _prompt().lower()
+    assert "react to what they said first" in low
+    assert "then spiral" in low
+
+
+def test_relevance_still_outranks_the_adhd_energy():
+    p = _prompt()
+    assert p.index(chat_engine.RELEVANCE_RULE) < p.index(chat_engine.ADHD_RULE)
+
+
+def test_relevance_governs_the_subject_not_the_length():
+    """`it wins whenever the two pull against each other` was overriding the
+    under-10-words and separate-messages rules as well as the topic ones, and
+    the kid sent a single 17-word message."""
+    low = _prompt().lower()
+    assert "wins whenever" not in low
+    assert "subject" in low
+    assert "never makes a message longer" in low
+    assert "never merges your messages into one" in low
+
+
+def test_the_burst_format_survives_the_adhd_rework():
+    low = _prompt().lower()
+    assert "under 10 words" in low
+    assert "separate messages" in low
+    assert "|||" in low
+
+
+def test_the_memory_block_is_untouched_by_the_ban_on_facts():
+    """`i dont need facts` is about fake statistics, not about recall -- the
+    owner asked for memory explicitly."""
+    p = _prompt(facts=["their name is walter", "works in IT and it drains them"])
+    assert "WHAT YOU KNOW ABOUT THEM" in p
+    assert "works in IT and it drains them" in p
+    assert chat_engine.FACTS_RULE in p
 
 
 def test_bond_line_changes_across_buckets():
