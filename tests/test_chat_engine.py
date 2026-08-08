@@ -68,6 +68,39 @@ def test_low_bond_also_flips_the_period_rule():
     assert "never end a message with a period" not in p
 
 
+# --- Fix 5: unhinged-short, not bland-short ---------------------------------
+
+def test_the_slang_list_arrives_as_a_requirement_not_a_suggestion():
+    """`SLANG TO LEAN ON: ...` was a list with no obligation attached, and the
+    model ignored it: live output was `hey`, `idk lol`, `so bored`, `u fold
+    laundry yet` while the whole vocab block went unused."""
+    assert chat_engine.VOCAB_RULE in _prompt(vocab=["gyatt 🍑", "aura farming 📈"])
+    assert chat_engine.VOCAB_RULE not in _prompt(vocab=[])
+
+
+def test_the_mood_is_pushed_rather_than_merely_mentioned():
+    """brainrot.PERSONAS' mood descriptions are vivid and were barely surfacing."""
+    assert chat_engine.MOOD_RULE in _prompt()
+
+
+def test_the_prompt_names_bland_shortness_as_the_failure():
+    """`short` was winning over the personality. The constraint stays; what
+    changes is that blandness is called out as a failure of it."""
+    p = _prompt().lower()
+    assert "idk lol" in p
+    assert "overreact" in p
+
+
+def test_the_format_rules_survive_the_rebalance():
+    """lowercase, ||| separation and the length cap were working and are not
+    the problem -- unhinged-short must not quietly become long."""
+    p = _prompt().lower()
+    assert "lowercase always" in p
+    assert "under 10 words" in p
+    assert "|||" in p
+    assert "no bullet points" in p
+
+
 def test_bond_line_changes_across_buckets():
     low = chat_engine.bond_line(-50)
     mid = chat_engine.bond_line(5)
