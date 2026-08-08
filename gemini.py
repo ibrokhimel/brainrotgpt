@@ -28,6 +28,7 @@ deadline below is short — a late reply is worse than a Groq one.
 """
 import asyncio
 import logging
+import time
 from typing import NamedTuple
 
 import config
@@ -151,6 +152,33 @@ def _read(resp, offered: frozenset[str]) -> "str | ToolCall":
     return "".join(str(getattr(p, "text", "") or "") for p in parts).strip()
 
 
+# Live, the owner's key turned out to be capped at 20 requests/day and was
+# exhausted, so every reply fell back to Groq — and the log said
+# `gemini failed () — falling back to groq`, which took a hand-run call to
+# explain. Two things were wrong with it. `%s` on a bare TimeoutError (which is
+# what the deadline raises) renders as the empty string, so `%r` here: it names
+# the type whether or not the exception carries a message. And a persistent
+# condition like an exhausted quota fails on EVERY reply, so an unthrottled line
+# per reply buries the rest of the log — but the FIRST occurrence of each
+# distinct failure always gets through, because a silent fallback is the bug
+# this is fixing, not the fix.
+FALLBACK_LOG_EVERY_S = 300
+FALLBACK_LOG_KEYS = 32   # bounded: the key carries error text, so it must not be a leak
+
+_logged: dict[str, float] = {}
+
+
+def _log_fallback(key: str, detail: str) -> None:
+    now = time.monotonic()
+    last = _logged.get(key)
+    if last is not None and (now - last) < FALLBACK_LOG_EVERY_S:
+        return
+    if len(_logged) >= FALLBACK_LOG_KEYS:
+        _logged.clear()
+    _logged[key] = now
+    logger.warning("gemini failed, falling back to groq: %s", detail)
+
+
 def first(fallback):
     """Wrap Groq's completer so Gemini takes the call and Groq takes the failures.
 
@@ -168,9 +196,12 @@ def first(fallback):
                                      max_tokens=max_tokens, tools=tools)
                 if not isinstance(out, str) or out.strip():
                     return out
-                logger.warning("gemini answered with nothing — falling back to groq")
+                _log_fallback("empty", "answered with nothing (safety block or truncation)")
             except Exception as e:  # noqa: BLE001 — every failure is groq's turn
-                logger.warning("gemini failed (%s) — falling back to groq", e)
+                # Keyed on the type plus the head of the message: an exhausted
+                # quota repeats with a different retry delay every time, so the
+                # whole string would defeat the throttle it is keying.
+                _log_fallback(f"{type(e).__name__}:{str(e)[:40]}", repr(e))
         return await fallback(messages, model=model, temperature=temperature,
                               max_tokens=max_tokens, tools=tools)
 
