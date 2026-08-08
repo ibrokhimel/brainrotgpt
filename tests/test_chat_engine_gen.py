@@ -21,9 +21,10 @@ def _run(coro):
 def _patch(monkeypatch, content="yo ||| wsp"):
     seen = {}
 
-    async def fake(messages, *, model, temperature, max_tokens):
+    async def fake(messages, *, model, temperature, max_tokens, tools=None):
         seen["messages"] = messages
         seen["model"] = model
+        seen["tools"] = tools
         return content
 
     monkeypatch.setattr(chat_engine, "_complete", fake)
@@ -148,7 +149,7 @@ def test_cold_open_returns_nothing_when_the_budget_is_gone(tmp_path, monkeypatch
 def test_generation_failure_yields_no_pieces_not_an_exception(tmp_path, monkeypatch):
     _fresh(tmp_path)
 
-    async def boom(messages, *, model, temperature, max_tokens):
+    async def boom(messages, *, model, temperature, max_tokens, tools=None):
         raise RuntimeError("groq down")
 
     monkeypatch.setattr(chat_engine, "_complete", boom)

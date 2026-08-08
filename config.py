@@ -91,6 +91,13 @@ TREND_SUBREDDITS = [
     ).split(",") if s.strip()
 ]
 KYM_FETCH_ENABLED = _flag("KYM_FETCH_ENABLED", True)
+
+# --- Web lookup (the kid checking something instead of bluffing) ----------
+# The model gets one tool and decides for itself when it needs it. DuckDuckGo,
+# so there is no API key to provision. Off switches the tool off entirely — no
+# redeploy, no code change — and the kid falls back to admitting it doesn't know.
+WEB_SEARCH_ENABLED = _flag("WEB_SEARCH_ENABLED", True)
+
 TREND_FETCH_HOUR = _int("TREND_FETCH_HOUR", 5)  # daily auto-fetch hour (server local)
 TREND_MAX_ADD = _int("TREND_MAX_ADD", 25)  # cap terms stored per auto refresh
 
