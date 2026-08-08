@@ -265,18 +265,32 @@ def prune_messages(chat_id: int, keep: int = 100) -> int:
 
 FACTS_MAX = 40            # per chat; older facts fall off the bottom
 
-_PUNCT = str.maketrans("", "", string.punctuation)
+# Curly quotes are not in string.punctuation, and phone keyboards produce them:
+# without this "I’m walter" folds to "i’m walter" and misses "im walter".
+_PUNCT = str.maketrans("", "", string.punctuation + "‘’“”")
+
+# A leading pronoun is voice, not content. The extractor is asked for third
+# person and mostly complies, but the model quotes the person's own words often
+# enough that the live DB held every fact twice -- "I work in IT" beside "They
+# work in IT." -- each pair eating two of the forty slots.
+_VOICE_PREFIXES = frozenset({"i", "im", "my", "mine", "they", "theyre", "their", "theirs"})
 
 
 def _normalise_fact(fact: str) -> str:
-    """Fold a fact to its comparison key: lowercase, no punctuation, one space.
+    """Fold a fact to its comparison key: lowercase, no punctuation, one space,
+    and no leading first/third-person pronoun.
 
     Exact match after folding, deliberately not fuzzy matching. "Their name is
-    WALTER!" and "their name is walter" are the same fact; "hates their job" and
-    "hates their boss" are two, and a similarity threshold that merged them
-    would quietly lose the second one.
+    WALTER!", "their name is walter" and "My name is Walter" are one fact;
+    "their job drains them" and "their boss drains them" are two, and a
+    similarity threshold that merged them would quietly lose the second one.
+    Only the FIRST word is dropped, so the pronoun is only ever treated as voice
+    where it can only be voice.
     """
-    return " ".join(fact.lower().translate(_PUNCT).split())
+    words = fact.lower().translate(_PUNCT).split()
+    if words and words[0] in _VOICE_PREFIXES:
+        words = words[1:]
+    return " ".join(words)
 
 
 def add_fact(chat_id: int, fact: str) -> bool:

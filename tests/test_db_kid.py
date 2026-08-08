@@ -231,6 +231,36 @@ def test_a_near_duplicate_fact_bumps_last_seen_instead_of_inserting(tmp_path):
     assert walter["created"] == was["created"]                    # same row, kept
 
 
+def test_a_first_person_fact_collapses_into_its_third_person_twin(tmp_path):
+    """The live DB held every fact twice -- "I work in IT" beside "They work in
+    IT.", "My name is Walter" beside "Their name is Walter." -- because the
+    normaliser folded punctuation and case but not the pronoun voice. Each fact
+    was eating two of the forty slots."""
+    _fresh(tmp_path)
+    assert db.add_fact(1, "They work in IT.") is True
+    assert db.add_fact(1, "I work in IT") is False
+    assert db.add_fact(1, "Their name is Walter.") is True
+    assert db.add_fact(1, "My name is Walter") is False
+    assert db.add_fact(1, "I'm from tashkent") is True
+    assert db.add_fact(1, "They're from tashkent") is False   # curly-quote-proof too
+    assert db.add_fact(1, "I’m from tashkent") is False
+    assert len(db.recent_facts(1)) == 3
+
+
+def test_the_voice_fold_does_not_merge_different_facts(tmp_path):
+    """Stripping the leading pronoun must not make everything after it collide."""
+    _fresh(tmp_path)
+    assert db.add_fact(1, "their job drains them") is True
+    assert db.add_fact(1, "their boss drains them") is True
+    assert len(db.recent_facts(1)) == 2
+
+
+def test_a_bare_pronoun_is_not_a_fact(tmp_path):
+    _fresh(tmp_path)
+    assert db.add_fact(1, "they") is False
+    assert db.recent_facts(1) == []
+
+
 def test_empty_facts_are_not_stored(tmp_path):
     _fresh(tmp_path)
     assert db.add_fact(1, "   ") is False

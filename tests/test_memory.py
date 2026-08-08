@@ -273,6 +273,21 @@ def test_the_extractor_is_told_the_lines_are_the_other_persons_only(tmp_path, mo
     assert "is not a fact about this person" in low
 
 
+def test_the_extractor_is_asked_for_one_consistent_voice(tmp_path, monkeypatch):
+    """Half the live facts came back quoting the person ("I work in IT") and
+    half describing them ("They work in IT."). db._normalise_fact now folds the
+    two together, but the cheaper fix is not to produce both in the first
+    place."""
+    _fresh(tmp_path)
+    db.add_message(1, "user", "hi")
+    seen = _capture(monkeypatch)
+    _run(memory.distill(1, db.get_chat_state(1)))
+
+    low = seen["prompt"].lower()
+    assert "third person" in low
+    assert "never write \"i\" or \"my\"" in low
+
+
 def test_a_chat_with_only_kid_messages_never_asks_the_model(tmp_path, monkeypatch):
     """A cold open they never answered. There is nothing to know, and asking
     anyway is exactly how the kid's own monologue became facts about them."""
