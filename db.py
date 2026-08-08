@@ -8,6 +8,7 @@ Calls are synchronous but tiny (local file); a lock keeps them safe across the
 event loop and the job-queue threads.
 """
 import sqlite3
+import string
 import threading
 import time
 
@@ -71,6 +72,14 @@ def init_db(path: str | None = None) -> None:
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS facts (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id   INTEGER NOT NULL,
+                fact      TEXT    NOT NULL,
+                created   REAL    NOT NULL,
+                last_seen REAL    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_facts_chat_seen ON facts(chat_id, last_seen);
             """
         )
         # Migrate older DBs that predate meme blurbs on trends.
@@ -238,6 +247,79 @@ def prune_messages(chat_id: int, keep: int = 100) -> int:
         cur = _db().execute(
             "DELETE FROM messages WHERE chat_id=? AND id NOT IN "
             "(SELECT id FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?)",
+            (chat_id, chat_id, keep),
+        )
+        _db().commit()
+        return cur.rowcount
+
+
+# --- Facts (the accumulating half of memory) ------------------------------
+
+FACTS_MAX = 40            # per chat; older facts fall off the bottom
+
+_PUNCT = str.maketrans("", "", string.punctuation)
+
+
+def _normalise_fact(fact: str) -> str:
+    """Fold a fact to its comparison key: lowercase, no punctuation, one space.
+
+    Exact match after folding, deliberately not fuzzy matching. "Their name is
+    WALTER!" and "their name is walter" are the same fact; "hates their job" and
+    "hates their boss" are two, and a similarity threshold that merged them
+    would quietly lose the second one.
+    """
+    return " ".join(fact.lower().translate(_PUNCT).split())
+
+
+def add_fact(chat_id: int, fact: str) -> bool:
+    """Record one atomic fact about a chat. True only when a new row landed.
+
+    Every distillation re-reads an overlapping window, so the same fact comes
+    back over and over; a repeat bumps `last_seen` on the existing row instead
+    of inserting, which both keeps the prompt clean and lets recency ordering
+    float what they keep bringing up back to the top.
+    """
+    fact = " ".join((fact or "").split())
+    norm = _normalise_fact(fact)
+    if not norm:
+        return False
+    now = time.time()
+    with _lock:
+        conn = _db()
+        # At most FACTS_MAX rows per chat, so folding in Python is cheaper than
+        # carrying a denormalised key column and keeping it in sync.
+        for row in conn.execute("SELECT id, fact FROM facts WHERE chat_id=?",
+                                (chat_id,)).fetchall():
+            if _normalise_fact(row["fact"]) == norm:
+                conn.execute("UPDATE facts SET last_seen=? WHERE id=?", (now, row["id"]))
+                conn.commit()
+                return False
+        conn.execute(
+            "INSERT INTO facts (chat_id, fact, created, last_seen) VALUES (?,?,?,?)",
+            (chat_id, fact, now, now),
+        )
+        conn.commit()
+    prune_facts(chat_id, keep=FACTS_MAX)
+    return True
+
+
+def recent_facts(chat_id: int, limit: int = FACTS_MAX) -> list[dict]:
+    """What the kid knows about this chat, most recently confirmed first."""
+    with _lock:
+        rows = _db().execute(
+            "SELECT id, chat_id, fact, created, last_seen FROM facts WHERE chat_id=? "
+            "ORDER BY last_seen DESC, id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def prune_facts(chat_id: int, keep: int = FACTS_MAX) -> int:
+    """Drop the least recently seen facts for one chat. Other chats untouched."""
+    with _lock:
+        cur = _db().execute(
+            "DELETE FROM facts WHERE chat_id=? AND id NOT IN "
+            "(SELECT id FROM facts WHERE chat_id=? ORDER BY last_seen DESC, id DESC LIMIT ?)",
             (chat_id, chat_id, keep),
         )
         _db().commit()

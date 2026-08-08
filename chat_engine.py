@@ -119,9 +119,37 @@ def should_reroll_mood(state: dict, now: float, *, rng) -> bool:
     return (now - float(set_at)) >= rng.uniform(MOOD_STALE_MIN_S, MOOD_STALE_MAX_S)
 
 
+# Knowing things about someone and never acting on it is the same as not knowing
+# them, and the old guidance was purely passive. This says what to DO with it,
+# split by who is talking first: on a reply the facts are how you show you were
+# listening, and when the kid opens the conversation they are what it opens
+# about. And — just as important — what not to do: a kid who lists back
+# everything you ever told them is a database, and one who asks about all of it
+# is conducting an interview.
+FACTS_RULE = ("Act like you were listening. When what they just said touches one of these, "
+              "show it — a callback, a dig, asking how the thing went — instead of answering "
+              "blank. When YOU are the one starting the conversation, one of these is what "
+              "you start it about. Never list them back, never say \"you told me\", never ask "
+              "about more than one at a time, and never bring one up just to prove you "
+              "remembered.")
+
+FACTS_IN_PROMPT = 12      # newest-first; the rest stay in the DB
+
+
+def _facts_for(state: dict) -> list[str]:
+    """What this chat has told the kid. Memory never gets to break a reply."""
+    chat_id = state.get("chat_id")
+    if chat_id is None:
+        return []
+    try:
+        return [r["fact"] for r in db.recent_facts(int(chat_id), limit=FACTS_IN_PROMPT)]
+    except Exception:  # noqa: BLE001 — generation must never depend on memory
+        return []
+
+
 def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
                         vocab: list[str], sticker_emoji: list[str],
-                        burst_target: int) -> str:
+                        burst_target: int, facts: list[str] | None = None) -> str:
     mood_key = state.get("mood") or "skibidi"
     mood = brainrot.PERSONA_BY_KEY.get(mood_key, brainrot.PERSONAS[1])
     bond = int(state.get("bond") or 0)
@@ -139,8 +167,17 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
     if day_state:
         parts += ["", f"WHAT'S GOING ON WITH YOU TODAY: {day_state}", DAY_STATE_RULE]
 
+    # The facts list supersedes the notes blob rather than sitting beside it:
+    # notes is by construction the most recent distillation's lines, and every
+    # one of those was written to `facts` in the same pass, so printing both
+    # says the same things twice under two different rules. The blob still gets
+    # rendered for chats whose notes predate the facts table.
     notes = (state.get("notes") or "").strip()
-    if notes:
+    facts = [f.strip() for f in (facts or []) if f and f.strip()]
+    if facts:
+        parts += ["", "WHAT YOU KNOW ABOUT THEM (newest first):",
+                  *(f"- {f}" for f in facts), FACTS_RULE]
+    elif notes:
         parts += ["", f"WHAT YOU KNOW ABOUT THEM: {notes}", NOTES_RULE]
 
     if memes:
@@ -212,6 +249,7 @@ def _context(state: dict, *, rng, target: int) -> str:
     return build_system_prompt(
         state, day_state=life.current(), memes=memes, vocab=vocab,
         sticker_emoji=stickers.available_emoji(), burst_target=target,
+        facts=_facts_for(state),
     )
 
 

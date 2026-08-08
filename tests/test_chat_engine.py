@@ -180,3 +180,70 @@ def test_mood_rerolls_only_once_stale():
 
 def test_mood_rerolls_when_never_set():
     assert chat_engine.should_reroll_mood({"mood_set_at": None}, 5.0, rng=random.Random(0))
+
+
+# --- facts: the accumulating half of memory reaching the prompt -------------
+
+def test_facts_reach_the_prompt_as_separate_lines():
+    p = _prompt(facts=["their name is walter", "hates their job"])
+    assert "- their name is walter" in p
+    assert "- hates their job" in p
+
+
+def test_the_facts_header_is_absent_when_there_are_none():
+    p = _prompt(facts=[])
+    assert "WHAT YOU KNOW ABOUT THEM" not in p
+    assert chat_engine.FACTS_RULE not in p
+
+
+def test_the_kid_is_told_to_use_the_facts_not_just_hold_them():
+    """Knowing things about someone and never acting on it is the same as not
+    knowing them -- the old block was handed over bare."""
+    p = _prompt(facts=["hates their job"])
+    assert chat_engine.FACTS_RULE in p
+    low = p.lower()
+    assert "act like you were listening" in low
+    assert "never list them back" in low          # reference, don't recite
+    assert "more than one at a time" in low       # reference, don't interrogate
+
+
+def test_facts_supersede_the_notes_blob_rather_than_repeating_it():
+    """notes is by construction the latest distillation's lines and every one of
+    those was written to facts in the same pass, so printing both says the same
+    thing twice under two rules that pull in different directions."""
+    p = _prompt(state={"notes": "their name is walter"}, facts=["their name is walter"])
+    assert p.count("their name is walter") == 1
+    assert chat_engine.NOTES_RULE not in p
+
+
+def test_a_legacy_notes_blob_still_shows_when_there_are_no_facts():
+    """Chats whose notes predate the facts table must not go blank."""
+    p = _prompt(state={"notes": "their name is walter"}, facts=[])
+    assert "their name is walter" in p
+    assert chat_engine.NOTES_RULE in p
+
+
+def test_blank_facts_do_not_produce_an_empty_bullet():
+    p = _prompt(facts=["", "   ", "hates their job"])
+    assert "- hates their job" in p
+    assert "- \n" not in p
+
+
+def test_context_pulls_this_chats_facts_from_the_db(tmp_path):
+    """_facts_for reads the chat off the state row, so a reply for chat 1 must
+    never be handed chat 2's memory."""
+    import db
+    db.close()
+    db.init_db(str(tmp_path / "ce_facts.db"))
+    db.add_fact(1, "their name is walter")
+    db.add_fact(2, "their name is jesse")
+    assert chat_engine._facts_for(db.get_chat_state(1)) == ["their name is walter"]
+
+
+def test_facts_lookup_never_breaks_generation(monkeypatch):
+    def boom(chat_id, limit=0):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(chat_engine.db, "recent_facts", boom)
+    assert chat_engine._facts_for({"chat_id": 1}) == []
+    assert chat_engine._facts_for({}) == []
