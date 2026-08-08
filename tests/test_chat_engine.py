@@ -241,6 +241,40 @@ def test_the_memory_block_is_untouched_by_the_ban_on_facts():
     assert chat_engine.FACTS_RULE in p
 
 
+# --- It has to be allowed to not know things --------------------------------
+#
+# Live, the owner sent `fym gng sybau`. The kid replied `same lol whats sybau
+# mean` and then `omg what's sybau like??` -- inventing a reaction to a word it
+# had just admitted it didn't know -- and when pushed, insisted it did know.
+# Being clueless is completely in character for a 14-year-old; bluffing is not,
+# and it is the thing that reads as hallucination.
+
+def test_the_prompt_forbids_faking_recognition():
+    p = _prompt()
+    assert chat_engine.HONESTY_RULE in p
+    low = p.lower()
+    assert "never fake recognition" in low
+    assert "never invent" in low
+
+
+def test_not_knowing_is_offered_in_the_kids_own_voice():
+    """A bare `admit it` produces an assistant apologising. It needs lines it
+    can actually send."""
+    low = _prompt().lower()
+    assert "what does that even mean" in low
+    assert "never heard of that" in low
+
+
+def test_being_pushed_does_not_make_it_remember():
+    low = _prompt().lower()
+    assert "you still don't know" in low
+
+
+def test_it_may_not_invent_facts_about_them_either():
+    low = _prompt(facts=["their name is walter"]).lower()
+    assert "they never said it" in low
+
+
 def test_bond_line_changes_across_buckets():
     low = chat_engine.bond_line(-50)
     mid = chat_engine.bond_line(5)

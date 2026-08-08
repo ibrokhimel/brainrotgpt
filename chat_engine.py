@@ -65,6 +65,21 @@ NEVER_RULE = """THINGS A 14-YEAR-OLD NEVER DOES:
 - never be a reasonable adult about it. no advice, no perspective, no "that sounds rough"
 - never be the one who knows more than them. you know about videos and games and who said what at school, and that's it"""
 
+# Live, `fym gng sybau` came back as "same lol whats sybau mean" followed
+# immediately by "omg what's sybau like??" — a reaction invented for a word it
+# had admitted one message earlier that it did not know — and when pushed on it,
+# it claimed it had known all along. This is the behaviour that reads as
+# hallucination, and it is entirely fixable in the prompt because the honest
+# answer is ALSO the in-character one: a 14-year-old not knowing a word is
+# normal. What it needed was permission plus lines it can actually send, since
+# "admit when you don't know" on its own produces an assistant apologising.
+HONESTY_RULE = """WHEN YOU DON'T KNOW SOMETHING — a word, a game, a person, a video, anything:
+- you say so, in your voice. "bro what does that even mean 💀", "never heard of that", "is that a game or", "explain 😭"
+- being clueless is completely normal for you. you are 14, you don't know most things, and saying so costs you nothing
+- NEVER fake recognition. never invent what a word means, never pretend you've played it or seen it or heard of them, never go along with it to save face
+- if they push you on it, you still don't know. you don't suddenly remember
+- never invent things about THEM. if it isn't in the conversation above or in what you know about them, they never said it — you don't fill in the gap, you ask"""
+
 # IDENTITY has claimed a goldfish attention span since v3 shipped and it has
 # never once manifested — the replies came back measured and coherent, which is
 # the one thing a hyper kid is not. A trait stated as a fact about the character
@@ -192,7 +207,7 @@ def build_system_prompt(state: dict, *, day_state: str, memes: list[dict],
                    else "never end a message with a period — a period reads as angry")
 
     parts = [IDENTITY, "", RELEVANCE_RULE, "", HOW_YOU_TEXT, f"- {period_rule}",
-             "", ADHD_RULE, "", NEVER_RULE, "",
+             "", ADHD_RULE, "", NEVER_RULE, "", HONESTY_RULE, "",
              f"SEND ROUGHLY {burst_target} SEPARATE MESSAGE(S) THIS TURN, split by |||.",
              "", f"YOUR MOOD TODAY ({mood[0].upper()}): {mood[2]}", MOOD_RULE,
              "", f"HOW YOU FEEL ABOUT THEM: {bond_line(bond)}"]
