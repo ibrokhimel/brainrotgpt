@@ -36,6 +36,24 @@ SCHOOL_DELAY_FACTOR = 2.0
 # module is that reply timing lives in one pure place.
 ENGAGED_WINDOW_S = 8 * 60
 
+# The three reply branches, as named constants so scheduler.py can derive its
+# fast-path ceiling from them instead of picking a number by hand.
+ENGAGED_RANGE = (1.5, 6)     # mid-conversation
+COLD_RANGE = (4, 15)         # first message after a silence
+BUSY_RANGE = (40, 90)        # the kid is genuinely doing something else
+BUSY_CHANCE = 0.02
+
+SLOW_FACTOR = 2.5            # salty, or a bond down in the annoyed register
+FAST_FACTOR = 0.6            # a high bond
+
+# The slowest reply_delay can possibly come back: the busy branch, in school,
+# and salty, all composed. scheduler.FAST_PATH_MAX_S is derived from this so
+# the two can never be chosen independently again — that drift is exactly how
+# the fast path stopped firing. Note this is the pre-sleep-window figure;
+# schedule_reply_at can still defer a 3am message to 9am, and that deferral is
+# supposed to land on the tick.
+MAX_REPLY_DELAY_S = BUSY_RANGE[1] * SCHOOL_DELAY_FACTOR * SLOW_FACTOR
+
 
 def is_asleep(ts: float) -> bool:
     return SLEEP_START_H <= dt.datetime.fromtimestamp(ts).hour < SLEEP_END_H
@@ -67,25 +85,30 @@ def next_ping(stage: int, now: float, *, rng, chattiness: str = "normal") -> tup
 def reply_delay(*, engaged: bool, bond: int, salty: bool, rng,
                 in_school: bool = False) -> float:
     """How long before the kid answers. Speed is itself a social signal."""
-    if rng.random() < 0.05:
-        base = rng.uniform(3 * 60, 15 * 60)      # genuinely busy
+    if rng.random() < BUSY_CHANCE:
+        # Texture: occasionally the kid really is doing something else. This
+        # was a 5% chance of 3-15 minutes, which is not texture — a fifteen
+        # minute silence is indistinguishable from the bot being broken. The
+        # mechanism stays; the magnitude does not.
+        base = rng.uniform(*BUSY_RANGE)
     elif engaged:
         # Mid-conversation. Paired with the in-process fast path in scheduler.py
         # this is the whole difference between a back-and-forth and a queue —
         # on the 60s tick alone the number here barely mattered.
-        base = rng.uniform(1.5, 6)
+        base = rng.uniform(*ENGAGED_RANGE)
     else:
-        # First contact after a long silence, and deliberately slow: the kid
-        # was doing something else, and the wait is what says so.
-        base = rng.uniform(20, 90)
+        # First contact after a silence. Still the slowest ordinary branch, so
+        # the pause still reads as "was doing something else" — but a moment is
+        # a couple of seconds, not the minute and a half this used to be.
+        base = rng.uniform(*COLD_RANGE)
     if in_school:
         base *= SCHOOL_DELAY_FACTOR   # phone under the desk; it composes with the rest
     if salty:
-        return base * 2.5
+        return base * SLOW_FACTOR
     if bond >= 40:
-        return base * 0.6
+        return base * FAST_FACTOR
     if bond <= -20:
-        return base * 2.5
+        return base * SLOW_FACTOR
     return base
 
 

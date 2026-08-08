@@ -70,13 +70,19 @@ RETRY_KIND = "reply:retry"
 RETRY_DELAY_S = 60
 REPLY_KINDS = ("reply", RETRY_KIND)
 
-# The tick runs every 60s, which used to swamp the reply latency entirely: a
-# computed 3-second delay landed anywhere from 3 to 63 seconds later. Anything
-# due before the next tick could plausibly reach it is delivered in-process
-# instead. Long delays — ghost pings, cold opens, sleep-window deferrals — stay
-# on the tick, because an hours-long asyncio.sleep is exactly the thing SQLite
-# scheduling exists to avoid.
-FAST_PATH_MAX_S = 55
+# The tick runs every 60s, which swamps the reply latency entirely: a computed
+# 3-second delay landed anywhere from 3 to 63 seconds later. Replies are
+# delivered in-process instead; a reply should never wait for the tick, whose
+# real jobs (ghost pings, cold opens, sleep-window deferrals, restart recovery)
+# are all minutes to days out.
+#
+# This ceiling is DERIVED, not chosen. It was a hand-picked 55s while ghost's
+# cold branch could return 90s, so the fast path almost never fired and nothing
+# in the code connected the two numbers — live, "morning" computed 65.3s,
+# overshot by ten seconds, and was still pending 13.4s overdue at +78s. Reading
+# the bound off ghost means widening a delay range can no longer silently
+# strand replies on the tick.
+FAST_PATH_MAX_S = ghost.MAX_REPLY_DELAY_S
 
 # Strong references to the in-flight sleepers. Without this the event loop only
 # holds a weak one and a task can be garbage-collected mid-sleep.

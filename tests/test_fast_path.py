@@ -107,6 +107,25 @@ def test_a_short_reply_delay_is_delivered_without_waiting_for_a_tick(tmp_path, m
     assert db.get_chat_state(801)["next_action_at"] is None
 
 
+def test_the_live_cold_reply_that_missed_the_ceiling_is_taken_in_process(tmp_path, monkeypatch):
+    """The exact failure: "morning" at 09:08:32 computed a 65.3s reply, which
+    overshot the 55s ceiling by ten seconds, fell through to the tick, and was
+    still pending -- 13.4s overdue -- at +78s. A reply should never wait for
+    the tick; the tick's real jobs are minutes to days out."""
+    _fresh(tmp_path)
+    _quiet(monkeypatch)
+    state = db.update_chat_state(1, next_action_at=time.time() + 65.3,
+                                 next_action_kind="reply")
+
+    async def scenario():
+        task = scheduler.arm_fast_reply(_Bot(), 1, state)
+        if task is not None:
+            task.cancel()
+        return task
+
+    assert _run(scenario()) is not None, "a 65s reply still fell through to the tick"
+
+
 def test_a_long_delay_stays_entirely_on_the_tick(tmp_path, monkeypatch):
     """Ghost pings, cold opens and sleep-window deferrals must not be taken
     in-process: an hours-long asyncio.sleep is exactly what SQLite scheduling

@@ -3,6 +3,7 @@ import pathlib
 import random
 
 import ghost
+import scheduler
 
 
 def _at(hour, minute=0, day=8):
@@ -118,12 +119,54 @@ def test_an_engaged_reply_lands_at_conversation_speed():
     assert 5 <= slow <= 7
 
 
-def test_the_cold_path_is_deliberately_unchanged():
-    """The FIRST message after a long silence should take a while -- that is
-    the signal that the kid was doing something else, and it is not the bug."""
+def test_a_cold_reply_is_seconds_not_a_minute_and_a_half():
+    """Revised: this previously pinned 20-90s as deliberate. It is not -- "a
+    moment before answering" is a couple of seconds, and the top of that range
+    on its own overshot the fast-path ceiling, so every slow cold reply fell
+    back to the 60s tick and cost up to 150s door to door."""
     fast = ghost.reply_delay(engaged=False, bond=0, salty=False, rng=_FixedRNG("lo"))
     slow = ghost.reply_delay(engaged=False, bond=0, salty=False, rng=_FixedRNG("hi"))
-    assert (fast, slow) == (20, 90)
+    assert (fast, slow) == (4, 15)
+
+
+def test_the_genuinely_busy_branch_is_texture_not_an_outage():
+    """The mechanism is kept -- occasionally the kid IS doing something else --
+    but 3-15 minutes is not texture, it is indistinguishable from the bot being
+    broken."""
+    busy = ghost.reply_delay(engaged=True, bond=0, salty=False, rng=_FixedRNG("hi", r=0.0))
+    assert 40 <= busy <= 90
+    assert ghost.BUSY_CHANCE <= 0.02
+
+
+def test_no_reply_delay_can_land_outside_the_fast_path_ceiling():
+    """The invariant that broke silently. Nothing connected reply_delay's
+    ranges to scheduler.FAST_PATH_MAX_S, so the cold branch overshot the
+    ceiling on its own and the fast path almost never fired. Live: "morning"
+    computed 65.3s, over the 55s ceiling, fell through to the tick, and was
+    still pending 13.4s overdue at +78s.
+
+    Every reply-path branch, every multiplier, and both composed.
+    """
+    worst = 0.0
+    for seed in range(400):
+        rng = random.Random(seed)
+        for engaged in (True, False):
+            for salty in (False, True):
+                for bond in (-50, 0, 80):
+                    for in_school in (False, True):
+                        worst = max(worst, ghost.reply_delay(
+                            engaged=engaged, bond=bond, salty=salty, rng=rng,
+                            in_school=in_school))
+    assert worst <= scheduler.FAST_PATH_MAX_S
+
+
+def test_the_fast_path_ceiling_is_derived_from_the_worst_case_delay():
+    """A hand-picked ceiling is what let the two drift apart in the first
+    place. FAST_PATH_MAX_S is now computed from the slowest delay ghost can
+    return, so widening a range cannot silently strand replies on the tick."""
+    assert scheduler.FAST_PATH_MAX_S >= ghost.MAX_REPLY_DELAY_S
+    assert ghost.MAX_REPLY_DELAY_S == (
+        ghost.BUSY_RANGE[1] * ghost.SCHOOL_DELAY_FACTOR * ghost.SLOW_FACTOR)
 
 
 def test_the_engaged_window_covers_several_minutes_of_conversation():
