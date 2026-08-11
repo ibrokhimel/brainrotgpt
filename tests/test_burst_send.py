@@ -180,3 +180,15 @@ def test_a_sticker_skipped_for_want_of_a_pack_consumes_no_gap_and_no_quote():
                            sticker_for=lambda e: None, reply_to=55))
 
     assert b.calls == [("one", 55)]
+
+
+def test_parsed_sticker_with_no_pack_match_is_dropped_not_leaked():
+    """End-to-end: a message that is nothing but an unresolvable sticker
+    directive must vanish entirely, not surface as a sticker send or as
+    literal text."""
+    bot, (sleep, _) = FakeBot(), _sleeper()
+    pieces = burst.parse("[sticker:🦄]")
+    _run(burst.send(bot, 1, pieces, rng=random.Random(0), sleeper=sleep,
+                    sticker_for=lambda e: None))
+    assert bot.stickers == []
+    assert bot.sent == []

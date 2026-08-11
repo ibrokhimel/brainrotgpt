@@ -15,7 +15,17 @@ from telegram.error import Forbidden
 DELIM = "|||"
 
 # [sticker:💀] as a whole segment — the model's way of picking a sticker.
-_STICKER_RE = re.compile(r"^\[sticker:\s*(\S+?)\s*\]$", re.IGNORECASE)
+# Tolerant of stray whitespace around the brackets, the word, and the colon
+# (models drift on spacing far more often than on the word itself), and of
+# multi-character/space-containing values via `.+?` instead of `\S+?`.
+_STICKER_RE = re.compile(r"^\[\s*sticker\s*:\s*(.+?)\s*\]$", re.IGNORECASE)
+# Loose safety net for anything that still LOOKS like a sticker directive
+# after the strict parse above fails to match it — e.g. trailing punctuation
+# glued onto the closing bracket, or a missing colon. `_STICKER_RE` has to
+# anticipate every shape a model might produce, which is a losing game; this
+# is the backstop that guarantees a directive is never sent as literal text
+# even when the tolerant parse above doesn't recognize it as one.
+_STICKER_LEAK_RE = re.compile(r"\[\s*sticker\b[^\]]*\]", re.IGNORECASE)
 # Sentence boundary for the no-delimiter fallback.
 _SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+")
 
@@ -59,6 +69,21 @@ def _segments(raw: str) -> list[str]:
     return _SENTENCE_RE.split(raw)
 
 
+def _drop_leaked_directive(seg: str) -> str:
+    """Strip any sticker-directive-shaped substring out of a text segment.
+
+    A directive inline in a longer message (`omg [sticker:💀] fr`) has real
+    content around it, so only the directive is cut and the rest is kept.
+    A segment that is nothing but a directive collapses to nothing once the
+    directive is removed, so it is dropped whole rather than sent as an
+    empty or punctuation-only message.
+    """
+    if not _STICKER_LEAK_RE.search(seg):
+        return seg
+    scrubbed = _STICKER_LEAK_RE.sub(" ", seg)
+    return re.sub(r"\s+", " ", scrubbed).strip()
+
+
 def parse(raw: str, *, max_msgs: int = 5, max_chars: int = 180) -> list[Piece]:
     """Split a model response into pieces, with a fallback when `|||` is absent."""
     pieces: list[Piece] = []
@@ -69,6 +94,11 @@ def parse(raw: str, *, max_msgs: int = 5, max_chars: int = 180) -> list[Piece]:
         m = _STICKER_RE.match(seg)
         if m:
             pieces.append(Piece("sticker", m.group(1)))
+            continue
+        # Nothing that still looks like a sticker directive is ever sent as
+        # text, even if the strict parse above didn't recognize its shape.
+        seg = _drop_leaked_directive(seg)
+        if not seg:
             continue
         for chunk in _hard_split(seg, max_chars):
             chunk = chunk.strip().rstrip(".")

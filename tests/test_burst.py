@@ -54,3 +54,48 @@ def test_empty_input_yields_nothing():
 
 def test_strips_quotes_and_model_preamble_artifacts():
     assert burst.parse('"yo" ||| "wsp"')[0].value == "yo"
+
+
+# --- sticker directive leak guard -------------------------------------------
+# Regression coverage for the bot literally sending `[sticker :(]` as text:
+# spacing variants the model produces must parse as stickers, and anything
+# that still looks like a directive after that must never reach the user as
+# a text piece — even when its exact shape wasn't anticipated.
+
+def test_tolerates_space_before_colon():
+    pieces = burst.parse("[sticker :(]")
+    assert pieces and pieces[0].kind == "sticker"
+
+
+def test_tolerates_space_around_brackets_and_word():
+    pieces = burst.parse("[ sticker:🗿 ]")
+    assert [(p.kind, p.value) for p in pieces] == [("sticker", "🗿")]
+
+
+def test_tolerates_space_after_colon():
+    pieces = burst.parse("[sticker: :(]")
+    assert [(p.kind, p.value) for p in pieces] == [("sticker", ":(")]
+
+
+def test_tolerates_uppercase_directive():
+    pieces = burst.parse("[STICKER:😭]")
+    assert [(p.kind, p.value) for p in pieces] == [("sticker", "😭")]
+
+
+def test_malformed_directive_as_entire_message_is_dropped_not_leaked():
+    """Trailing punctuation glued onto the bracket defeats the tolerant
+    parse, so this must fall to the leak guard and be dropped whole rather
+    than sent as `[sticker:💀].`."""
+    assert burst.parse("[sticker:💀].") == []
+
+
+def test_colonless_directive_as_entire_message_is_dropped_not_leaked():
+    assert burst.parse("[sticker 💀]") == []
+
+
+def test_inline_directive_is_stripped_and_surrounding_text_kept():
+    """A directive embedded in a longer message has real content around it
+    (`omg ... fr`), so the directive is cut and the rest is sent — dropping
+    the whole message would throw away real content for no reason."""
+    pieces = burst.parse("omg [sticker:💀] fr")
+    assert [(p.kind, p.value) for p in pieces] == [("text", "omg fr")]
