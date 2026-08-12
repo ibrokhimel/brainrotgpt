@@ -132,6 +132,20 @@ async def _complete(messages, *, model, temperature, max_tokens, tools=None) -> 
     raise last_err or RuntimeError("no groq client")
 
 
+def _proactive():
+    """The provider seam for a call nobody is waiting on.
+
+    Same Gemini-then-Groq path a reply takes — Groq is 403 from the deployment,
+    so "the cheap model" is not a thing that answers any more — but with the
+    retry budget removed. A ghost ping that sits out a 429 is spending the window
+    the next real reply needs, and it is not worth a single second of it.
+
+    Built per call, not once at import: `enabled()` reads config live, so a key
+    set on a running bot works, exactly as it does for `reply`.
+    """
+    return gemini.first(_complete, backoff=gemini.NO_RETRY)
+
+
 def _context(state: dict, *, rng, target: int, lookup: list[dict] | None = None,
              recalled: list[dict] | None = None, can_look_up: bool = False,
              tools_offered: bool = False) -> str:
@@ -156,7 +170,8 @@ async def _generate(system: str, user: str, *, model, temperature, max_tokens,
     callable taking the ToolCall, running it, and returning the system prompt to
     generate from. Pass neither (pings, cold opens — neither is answering a
     question) and the model never sees a tool. `complete` is the provider seam —
-    None is Groq, and `reply` hands in gemini.first so Gemini takes that one call.
+    None is Groq alone, and every caller hands in a gemini.first wrapper so
+    Gemini takes the call with Groq underneath it.
 
     The whole path is inside the try on purpose. burst.parse runs regexes over
     untrusted model output and the tool round parses JSON off the wire, so both
@@ -276,7 +291,8 @@ async def ping(chat_id: int, state: dict, stage: int, *, rng) -> list[burst.Piec
             f"{_ping_divergence(chat_id)}\n\n"
             f"Send 1-2 very short messages, separated by |||.")
     pieces = await _generate(system, user, model=config.GROQ_FALLBACK_MODEL,
-                             temperature=1.1, max_tokens=120, max_msgs=2)
+                             temperature=1.1, max_tokens=120, max_msgs=2,
+                             complete=_proactive())
     if pieces:
         budget.spend(time.time())
     return pieces
@@ -291,7 +307,8 @@ async def cold_open(chat_id: int, state: dict, *, rng) -> list[burst.Piece]:
             "today, bring up a meme you're into, or call back to something you know "
             "about them. 1-2 very short messages, separated by |||.")
     pieces = await _generate(system, user, model=config.GROQ_FALLBACK_MODEL,
-                             temperature=1.15, max_tokens=120, max_msgs=2)
+                             temperature=1.15, max_tokens=120, max_msgs=2,
+                             complete=_proactive())
     if pieces:
         budget.spend(time.time())
     return pieces

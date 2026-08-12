@@ -14,6 +14,7 @@ from groq import AsyncGroq
 import budget
 import config
 import db
+import gemini
 
 logger = logging.getLogger("brainrotgpt.life")
 
@@ -42,20 +43,33 @@ def in_school_block(ts: float) -> bool:
     return config.SCHOOL_START_HOUR <= when.hour < config.SCHOOL_END_HOUR
 
 
-async def _ask(prompt: str) -> str:
+async def _groq(messages, *, model, temperature, max_tokens, tools=None) -> str:
     last_err: Exception | None = None
     for client in _clients:
         try:
             resp = await client.chat.completions.create(
-                model=config.GROQ_FALLBACK_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=1.1,
-                max_tokens=40,
+                model=model, messages=messages,
+                temperature=temperature, max_tokens=max_tokens,
             )
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:  # noqa: BLE001
             last_err = e
     raise last_err or RuntimeError("no groq client")
+
+
+async def _ask(prompt: str) -> str:
+    """One completion, Gemini first and Groq underneath — the same path a reply
+    takes, because Groq alone is 403 from the deployment.
+
+    NO_RETRY on purpose: this runs once a day on a timer with nobody watching,
+    and yesterday's state carrying over is a far cheaper outcome than sitting in
+    a backoff loop holding the window a real reply is about to want.
+    """
+    out = await gemini.first(_groq, backoff=gemini.NO_RETRY)(
+        [{"role": "user", "content": prompt}],
+        model=config.GROQ_FALLBACK_MODEL, temperature=1.1, max_tokens=40,
+    )
+    return out.strip() if isinstance(out, str) else ""
 
 
 async def refresh() -> str:

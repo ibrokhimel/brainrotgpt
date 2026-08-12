@@ -96,27 +96,34 @@ def test_a_reply_through_gemini_still_carries_the_kid_prompt(tmp_path, monkeypat
     assert "Jayden" in system and "NEVER fake recognition" in system
 
 
-def test_pings_stay_on_groq_even_with_a_key(tmp_path, monkeypatch):
+# Pings and cold opens used to stay on Groq — ~14k requests/day against Gemini's
+# ~1,500 made that the obvious home for the background volume. Then Groq started
+# 403ing the deployment's IP and "the cheap model" stopped being a model that
+# answers, so they route through Gemini now too (test_gemini_retry.py). What is
+# still worth pinning here is the OTHER half: when Gemini is off or fails, the
+# proactive calls must land on Groq's cheap model, not the reply model.
+
+def test_a_ping_falling_back_to_groq_still_uses_the_cheap_model(tmp_path, monkeypatch):
     _fresh(tmp_path)
     _key(monkeypatch)
     calls = _patch_groq(monkeypatch, "yo")
-    seen = _patch_gemini(monkeypatch, "never called")
+    _patch_gemini(monkeypatch, raises=RuntimeError("404 NOT_FOUND"))
 
     _run(chat_engine.ping(1, db.get_chat_state(1), 1, rng=random.Random(0)))
 
-    assert len(calls) == 1 and seen == []
+    assert len(calls) == 1
     assert calls[0]["model"] == config.GROQ_FALLBACK_MODEL
 
 
-def test_cold_opens_stay_on_groq_even_with_a_key(tmp_path, monkeypatch):
+def test_a_cold_open_falling_back_to_groq_still_uses_the_cheap_model(tmp_path, monkeypatch):
     _fresh(tmp_path)
     _key(monkeypatch)
     calls = _patch_groq(monkeypatch, "yo")
-    seen = _patch_gemini(monkeypatch, "never called")
+    _patch_gemini(monkeypatch, raises=RuntimeError("404 NOT_FOUND"))
 
     _run(chat_engine.cold_open(1, db.get_chat_state(1), rng=random.Random(0)))
 
-    assert len(calls) == 1 and seen == []
+    assert len(calls) == 1
     assert calls[0]["model"] == config.GROQ_FALLBACK_MODEL
 
 
@@ -233,7 +240,9 @@ def test_a_different_failure_is_never_swallowed_by_the_throttle(monkeypatch, cap
     """Throttling one condition must not hide the next one turning up."""
     _key(monkeypatch)
     gemini._logged.clear()
-    errs = [RuntimeError("429 RESOURCE_EXHAUSTED"), RuntimeError("429 RESOURCE_EXHAUSTED"),
+    # Both non-retryable, so each call reaches the log exactly once — this is
+    # about the throttle, and a 429 here would spend its retries instead.
+    errs = [RuntimeError("403 Access denied"), RuntimeError("403 Access denied"),
             RuntimeError("404 NOT_FOUND no longer available")]
 
     async def groq(messages, *, model, temperature, max_tokens, tools=None):
@@ -250,7 +259,7 @@ def test_a_different_failure_is_never_swallowed_by_the_throttle(monkeypatch, cap
 
     lines = [r.getMessage() for r in caplog.records]
     assert len(lines) == 2
-    assert "429" in lines[0] and "404" in lines[1]
+    assert "403" in lines[0] and "404" in lines[1]
 
 
 def test_the_throttle_reopens_once_the_window_passes(monkeypatch, caplog):

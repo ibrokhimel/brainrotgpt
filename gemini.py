@@ -6,11 +6,19 @@ statistic to sound informed, answering something adjacent to what was asked.
 `gemini-2.5-flash` follows the prompt noticeably better than llama does, and the
 prompt is where the whole character lives.
 
-Groq keeps everything else, and that is not a compromise: ~14,000 requests/day
-against Gemini's ~1,500, at lower latency. Ghost pings, cold opens, notes
-distillation and the daily life state fire in the background across every chat,
-and nobody reads them closely. The one call that IS read closely gets the model
-that follows instructions; the volume stays where the quota is.
+Groq used to keep everything else — ~14,000 requests/day against Gemini's
+~1,500, at lower latency — and then Groq started answering every call from the
+deployment's IP with `403 Access denied`. A fallback to a blocked provider is
+not a fallback, so the split by volume is gone: everything Gemini can take,
+Gemini takes, and Groq stays wired underneath for whenever that IP is unblocked.
+
+What replaces the split is a split by WHO IS WAITING. Gemini's limit is a short
+rolling window that recovers inside a minute, so a 429 is worth waiting out
+rather than failing — but only for a reply, where a person is watching an empty
+chat. Ghost pings, cold opens, notes distillation and the daily life state get
+one attempt and give up: nobody reads them the moment they land, and a proactive
+call that sits in a backoff loop is spending the quota the next real reply
+needs. `first`'s `backoff` argument is that asymmetry and nothing else.
 
 TRANSLATION. `search.TOOL` and `recall.TOOL` are written OpenAI-style because
 Groq speaks OpenAI. Gemini does not: it wants `function_declarations` with an
@@ -28,6 +36,7 @@ deadline below is short — a late reply is worse than a Groq one.
 """
 import asyncio
 import logging
+import re
 import time
 from typing import NamedTuple
 
@@ -179,7 +188,47 @@ def _log_fallback(key: str, detail: str) -> None:
     logger.warning("gemini failed, falling back to groq: %s", detail)
 
 
-def first(fallback):
+# Waiting out the rolling window. Three retries, ~31s of waiting worst case,
+# which is inside the ~35s a reply may add before the silence is the better
+# outcome anyway. The first step is short because most 429s here clear almost
+# immediately; the last is long because a window that survived 11s is a window
+# that needs real time.
+RETRY_BACKOFF_S = (3.0, 8.0, 20.0)
+RETRY_MAX_TOTAL_S = 35.0
+NO_RETRY: tuple[float, ...] = ()     # what every proactive call passes
+
+# A 429 is the ONLY failure worth a second attempt. 403 (the IP block), 404 (a
+# retired model), a safety block, a blown deadline — none of those come good by
+# asking again, and each retry is seconds of an already-late reply. Matched on
+# the code when the SDK exposes one and on the text when it does not, because
+# google.genai's error type is not importable here without paying for the import
+# on a machine that may not have the package at all.
+_THROTTLED = re.compile(r"\b429\b|RESOURCE_EXHAUSTED", re.I)
+
+# `'retryDelay': '17s'` inside the error body. The server knows when its own
+# window reopens better than a fixed schedule does.
+_RETRY_DELAY = re.compile(r"retry[-_]?delay\W{0,4}?(\d+(?:\.\d+)?)\s*s", re.I)
+
+
+def _throttled(e: BaseException) -> bool:
+    for attr in ("code", "status_code"):
+        v = getattr(e, attr, None)
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v == 429          # an SDK that reports a code is believed outright
+    return bool(_THROTTLED.search(str(e)))
+
+
+def _retry_delay(e: BaseException) -> float | None:
+    m = _RETRY_DELAY.search(str(e))
+    return float(m.group(1)) if m else None
+
+
+async def _sleep(seconds: float) -> None:
+    """The wait, behind a seam so tests can assert the schedule without living it."""
+    await asyncio.sleep(seconds)
+
+
+def first(fallback, *, backoff: tuple[float, ...] = RETRY_BACKOFF_S):
     """Wrap Groq's completer so Gemini takes the call and Groq takes the failures.
 
     Returns something with `_complete`'s exact signature, so chat_engine can hand
@@ -188,24 +237,63 @@ def first(fallback):
     Gemini can fail — raising, timing out, or a safety block arriving as a 200
     with no text at all — falls through to `fallback` and still answers. `model`
     is Groq's and passes straight through; Gemini's own is config.GEMINI_MODEL.
+
+    `backoff` is how long this caller is willing to wait out a 429, one entry per
+    retry. Replies take the default; everything proactive passes NO_RETRY and
+    gets a single attempt. Nothing else is ever retried.
+
+    The latency cap belongs to the WRAPPER, not to one call through it, because
+    a reply that reaches for a tool goes through here twice: per-call budgets
+    would let a throttled tool round and a throttled second round each spend the
+    cap and put the reply a minute out. Each `reply` builds its own wrapper, so
+    the running total is one reply's and never leaks between chats.
     """
+    waited = 0.0
+
     async def complete_(messages, *, model, temperature, max_tokens, tools=None):
+        nonlocal waited
         if enabled():
-            try:
-                out = await complete(messages, temperature=temperature,
-                                     max_tokens=max_tokens, tools=tools)
-                if not isinstance(out, str) or out.strip():
-                    return out
-                _log_fallback("empty", "answered with nothing (safety block or truncation)")
-            except Exception as e:  # noqa: BLE001 — every failure is groq's turn
-                # Keyed on the type plus the head of the message: an exhausted
-                # quota repeats with a different retry delay every time, so the
-                # whole string would defeat the throttle it is keying.
-                _log_fallback(f"{type(e).__name__}:{str(e)[:40]}", repr(e))
+            for i in range(len(backoff) + 1):
+                try:
+                    out = await complete(messages, temperature=temperature,
+                                         max_tokens=max_tokens, tools=tools)
+                    if not isinstance(out, str) or out.strip():
+                        return out
+                    _log_fallback("empty", "answered with nothing (safety block or truncation)")
+                    break
+                except Exception as e:  # noqa: BLE001 — every failure is groq's turn
+                    delay = _wait_for(e, backoff, i, waited)
+                    if delay is None:
+                        # Keyed on the type plus the head of the message: an
+                        # exhausted quota repeats with a different retry delay
+                        # every time, so the whole string would defeat the
+                        # throttle it is keying.
+                        _log_fallback(f"{type(e).__name__}:{str(e)[:40]}", repr(e))
+                        break
+                    logger.info("gemini throttled, retrying in %.1fs (attempt %d)", delay, i + 2)
+                    waited += delay
+                    await _sleep(delay)
         return await fallback(messages, model=model, temperature=temperature,
                               max_tokens=max_tokens, tools=tools)
 
     return complete_
+
+
+def _wait_for(e: BaseException, backoff: tuple[float, ...], i: int,
+              waited: float) -> float | None:
+    """How long to wait before attempt i+2, or None to stop retrying now.
+
+    A server-supplied delay wins over the schedule — it is the window's actual
+    reopening time — but it cannot buy more than the cap, and a delay that would
+    blow the cap stops the retries here rather than waiting a truncated amount
+    that is guaranteed to 429 again on arrival.
+    """
+    if i >= len(backoff) or not _throttled(e):
+        return None
+    delay = _retry_delay(e)
+    if delay is None:
+        delay = backoff[i]
+    return delay if delay > 0 and waited + delay <= RETRY_MAX_TOTAL_S else None
 
 
 async def complete(messages, *, temperature, max_tokens, tools=None) -> "str | ToolCall":
